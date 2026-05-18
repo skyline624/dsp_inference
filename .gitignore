@@ -1,0 +1,23 @@
+# Build outputs (regenerable, 16+ MiB)
+impl/
+
+# Build logs (verbose, regenerable)
+build*.log
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Gowin temporary
+*.gprj.user
+*.user
