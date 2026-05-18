@@ -986,11 +986,9 @@ module top (
                                       op_soft             ? soft_shift_out :
                                       op_rope             ? rope_shift_out :
                                       op_silu             ? silu_shift_out : rms_shift_out;
-    wire [7:0]        cur_dbg_byte  = op_attn ? attn_dbg[tx_idx[2:0]]   :
-                                      op_soft ? soft_dbg[tx_idx[2:0]]   :
-                                      op_rope ? rope_dbg[tx_idx[2:0]]   :
-                                      op_silu ? silu_dbg[tx_idx[1:0]]   :
-                                                rms_dbg [tx_idx[2:0]];
+    // Debug TX bytes : envoyait acc/lut_idx/etc. Apres optimisation LUT, on send 0.
+    // L'API Python reste identique (meme nombre de bytes), juste les valeurs sont zero.
+    wire [7:0]        cur_dbg_byte  = 8'd0;
 
     always @(posedge clk_sys) begin
         if (rst) begin
