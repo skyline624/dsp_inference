@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test FQ : matmul DMA + requantize int8+shift.
+# test FQ : matmul DMA + requantize int8+shift.
 # Protocole : 'F''Q' N(1) sx sw x[64] addr[3]                  (72 oct)
 # Reponse   : 'F''Q' shift_total(1) y_int8[N]                  (3+N oct)
 
@@ -43,7 +43,7 @@ def main():
         ntotal += 1
         W = rng.integers(-50, 50, (N, K), dtype=np.int8)
         x = rng.integers(-50, 50, K, dtype=np.int8)
-        # Reference Python
+        # reference Python
         y_int32 = (W.astype(np.int64) @ x.astype(np.int64))
         max_abs = int(np.max(np.abs(y_int32)))
         if max_abs == 0:
@@ -64,7 +64,7 @@ def main():
         y_fpga, st_fpga = call_fq(ser, N, sx, sw, x, 0x000300)
         ok_shift = (st_fpga == shift_total_ref)
         ok_y     = np.array_equal(y_fpga, y_int8_ref)
-        # Verifie aussi la valeur reelle
+        # Verifie aussi la value reelle
         y_real_ref  = y_int8_ref.astype(np.int64) * (2 ** shift_total_ref)
         y_real_fpga = y_fpga.astype(np.int64) * (2 ** st_fpga)
         print(f"N={N:2d}  shift_used={shift_used}  shift_total : ref={shift_total_ref:+d} fpga={st_fpga:+d}  {'OK' if ok_shift else 'FAUX'}")

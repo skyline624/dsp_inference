@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test : FFN block avec hidden=172 (= stories260K reel) via chunking.
+# test : FFN block with hidden=172 (= stories260K reel) via chunking.
 
 import time, serial
 import numpy as np

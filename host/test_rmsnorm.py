@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test du module rmsnorm_op avec debug outputs.
+# test du module rmsnorm_op with debug outputs.
 # Protocole : 'N' 'N' shift_x shift_w x[64] w[64]
 #  -> 'N' 'K' shift_out acc[3] p[1] shift_amt[1signed] raw_inv[2] apply_shift[1signed] out[64]
 #
-# 75 octets de reponse au total. On compare chaque intermediaire a la reference Python.
+# 75 bytes de reponse au total. On compare each intermediaire a la reference Python.
 
 import time, struct, sys
 import numpy as np
@@ -51,8 +51,8 @@ def expected_intermediates(x_i8, sx):
     else:
         raw_inv = raw_inv_pre
     # apply_shift = (shift_amt >>> 1) - 16
-    # Verilog >>> sur signed : ex. shift_amt=-3 -> -2 (arrondi vers -inf), -1 -> -1, 1 -> 0, etc.
-    apply_shift = (shift_amt >> 1) - 16   # Python >> sur negatif arrondi vers -inf, idem Verilog $signed >>>
+    # Verilog >>> sur signed : ex. shift_amt=-3 -> -2 (arrondi to -inf), -1 -> -1, 1 -> 0, etc.
+    apply_shift = (shift_amt >> 1) - 16   # Python >> sur negatif arrondi to -inf, idem Verilog $signed >>>
     return acc, p, shift_amt, raw_inv, apply_shift
 
 def main():
@@ -77,7 +77,7 @@ def main():
     x_pos = np.arange(D, dtype=np.int8)                  # x[i] = i (0..63)
     test_cases.append(("x[i]=i (rampe), w=1", x_pos, 0, np.ones(D, dtype=np.int8), 0))
     rng = np.random.default_rng(42)
-    # N(0,1) avec w=1 encode en shift bas (= encodage realiste LLM, max precision)
+    # N(0,1) with w=1 encode en shift bas (= encodage realiste LLM, max precision)
     x_n, sx_n = to_i8_shift(rng.normal(0,1,D).astype(np.float32))
     w_n, sw_n = to_i8_shift(np.ones(D, dtype=np.float32))   # = ([64]*64, -6)
     test_cases.append(("N(0,1), w=1 (encodage precis)", x_n, sx_n, w_n, sw_n))
@@ -95,7 +95,7 @@ def main():
             print(f"  ECHEC TRANSFERT : {e}"); continue
         out_real = from_i8_shift(out_i8, so)
 
-        # comparer chaque intermediaire
+        # comparer each intermediaire
         print(f"  acc         : attendu={e_acc:9d}  fpga={acc:9d}   {'OK' if acc==e_acc else 'FAUX'}")
         print(f"  p           : attendu={e_p:+5d}      fpga={p:+5d}      {'OK' if p==e_p else 'FAUX'}")
         print(f"  shift_amt   : attendu={e_sa:+5d}      fpga={sa:+5d}      {'OK' if sa==e_sa else 'FAUX'}")

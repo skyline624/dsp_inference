@@ -16,8 +16,8 @@ from v4_quant import to_i8_shift, from_i8_shift
 #   3. inv_rms = 1 / sqrt(mean_int * 2^(2*shift_x) + eps)
 #   4. out[i] = x[i] * w[i] * inv_rms  -> re-quantifie en int8 + new shift
 #
-# Pour le hardware : LUT 1/sqrt(x) de 256 entrees apres normalisation par le
-# bit de tete (ramener mean dans [1, 4) ou similaire).
+# Pour le hardware : LUT 1/sqrt(x) de 256 entrees after normalisation par le
+# bit de tete (ramener mean in [1, 4) ou similaire).
 
 def rmsnorm_i8_ref(x_i8, shift_x, w_i8, shift_w, eps=1e-5):
     """RMSNorm sur (x_i8, shift_x) avec poids (w_i8, shift_w).
@@ -26,10 +26,10 @@ def rmsnorm_i8_ref(x_i8, shift_x, w_i8, shift_w, eps=1e-5):
 
     # 1. somme des carres en int. x[i] real = x_i8[i] * 2^shift_x
     #    x[i]^2 real = x_i8[i]^2 * 2^(2*shift_x)
-    sq = (x_i8.astype(np.int64)) ** 2          # int24 par valeur (max 127^2*64 = 1.03M)
+    sq = (x_i8.astype(np.int64)) ** 2          # int24 par value (max 127^2*64 = 1.03M)
     acc = int(sq.sum())                         # int24
 
-    # 2. mean = acc / D, en valeur reelle
+    # 2. mean = acc / D, en value reelle
     mean_real = float(acc) * (2.0 ** (2 * shift_x)) / D + eps
 
     # 3. 1 / sqrt(mean)

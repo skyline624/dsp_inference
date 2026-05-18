@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Test : couche transformer complete = attention block + FFN block.
-# Verifie qu'une couche complete sur FPGA produit le meme resultat (a la quantif pres)
+# test : couche transformer complete = attention block + FFN block.
+# Verifie qu'une couche complete sur FPGA produit le same resultat (a la quantif pres)
 # que la reference numpy float.
 
 import time, serial
@@ -27,7 +27,7 @@ def main():
     ffn_w_real,  ffn_w_fpga  = setup_ffn_weights( ser, rng, base_addr=0x110000)
     print("Poids attn et ffn charges en SDRAM\n")
 
-    # Reference
+    # reference
     x_out_ref = transformer_layer_ref(x_real, attn_w_real, ffn_w_real)
     print(f"REF : x_out[:6] = {x_out_ref[:6].round(3)}")
 

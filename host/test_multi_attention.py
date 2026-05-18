@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test multi-head attention (H=8, KH=4 GQA, HS=8) sur FPGA.
+# test multi-head attention (H=8, KH=4 GQA, HS=8) sur FPGA.
 # Protocole : 'M''M' sq sk sv T(1) Q[64] K[T*32] V[T*32]
 # Reponse   : 'M''K' shift_out out[64]  (67 oct)
 
@@ -96,7 +96,7 @@ def main():
     rng = np.random.default_rng(123)
 
     cases = []
-    # Test 1 : Q=0 -> attn uniforme partout, out = mean(V) per head
+    # test 1 : Q=0 -> attn uniforme partout, out = mean(V) per head
     Q1 = np.zeros(H*HS, dtype=np.int8)
     K1 = rng.integers(-20, 20, (T, KH, HS), dtype=np.int8)
     V1 = np.array([[[1]*HS, [2]*HS, [3]*HS, [4]*HS],  # t=0
@@ -105,7 +105,7 @@ def main():
                    [[13]*HS, [14]*HS, [15]*HS, [16]*HS]], dtype=np.int8)
     cases.append(("Q=0, V variable -> mean per kv-head", Q1, K1, V1))
 
-    # Test 2 : random tout
+    # test 2 : random tout
     Q2 = rng.integers(-40, 40, H*HS, dtype=np.int8)
     K2 = rng.integers(-40, 40, (T, KH, HS), dtype=np.int8)
     V2 = rng.integers(-60, 60, (T, KH, HS), dtype=np.int8)

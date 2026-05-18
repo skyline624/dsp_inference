@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Test du module silu_op sur FPGA.
+# test du module silu_op sur FPGA.
 # Protocole : 'S' 'S' shift_x x[64]
 #  -> 'S' 'K' shift_out lut_idx[1] silu_int[2 LE] out[64]
-# 69 octets de reponse au total.
+# 69 bytes de reponse au total.
 
 import time, sys
 import numpy as np
@@ -32,13 +32,13 @@ def expected_lut_idx(x_i8_last, sx):
     """Index LUT pour le DERNIER element (idx = D-1)."""
     x_real = int(x_i8_last) * (2.0 ** sx)
     idx = int(round(x_real * 16 + 128))   # plus simple, pas exact en RTL
-    # En RTL on fait shift entier, pas multiplication. Calcul exact :
+    # En RTL on does shift entier, pas multiplication. Calcul exact :
     shx_p4 = sx + 4
     xs = int(x_i8_last)
     if shx_p4 >= 0:
         x16 = xs << shx_p4
     else:
-        x16 = xs >> (-shx_p4)   # arithmetique vers -inf
+        x16 = xs >> (-shx_p4)   # arithmetique to -inf
     idx_int = x16 + 128
     if idx_int < 0: idx_int = 0
     if idx_int > 255: idx_int = 255
@@ -61,7 +61,7 @@ def silu_ref(x_i8, sx):
         x = (idx - 128) / 16.0
         y = x / (1.0 + np.exp(-x))
         silu_int = int(round(y * 2048))
-        # silu_int >> (11 + sx) avec arrondi + clip
+        # silu_int >> (11 + sx) with arrondi + clip
         out_shift = 11 + sx
         if out_shift > 0:
             o = (silu_int + (1 << (out_shift - 1))) >> out_shift
@@ -92,7 +92,7 @@ def main():
         except Exception as e:
             print(f"  ECHEC : {e}"); continue
         ref_i8 = silu_ref(x_i8, sx)
-        # debug du DERNIER element (idx=63)
+        # debug du last element (idx=63)
         exp_idx = expected_lut_idx(x_i8[D-1], sx)
         exp_si  = expected_silu_int(exp_idx)
         ok_idx = lut_idx == exp_idx

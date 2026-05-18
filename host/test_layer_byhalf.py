@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Debug pousse : compare x apres CHAQUE demi-layer (attn puis ffn) FPGA vs v4sim.
+# Debug pousse : compare x after each demi-layer (attn then ffn) FPGA vs v4sim.
 # Permet d'identifier exactement ou la divergence apparait.
 
 import time
@@ -78,7 +78,7 @@ def main():
 
     # Init
     x_ref  = m['tok_emb'][1].astype(np.float32).copy()
-    x_fpga_real = x_ref.copy()  # meme depart
+    x_fpga_real = x_ref.copy()  # same depart
     pos = 0
     print(f"Embed init : x[:4] = {x_ref[:4].round(3)}\n")
 

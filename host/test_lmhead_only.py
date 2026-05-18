@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Debug en 2 etapes :
+# Debug en 2 steps :
 #   1. v4sim full forward jusqu'a x_norm pre-lm_head -> donne x_norm_i8 et sxn
-#   2a. Sans FPGA : matvec_q reference Python -> logits_ref + argmax_ref
+#   2a. without FPGA : matvec_q reference Python -> logits_ref + argmax_ref
 #   2b. FPGA chunked : matvec_chunked_N sur tok_emb -> logits_fpga + argmax_fpga
-#   Compare. Isolement complet de la chunked matmul (pas de rmsnorm FPGA).
+#   compare. Isolement complete de la chunked matmul (pas de rmsnorm FPGA).
 
 import time, sys
 import numpy as np
@@ -53,7 +53,7 @@ def v4sim_forward_capture(m, token, kv_caches, pos):
         h_i8, sh = mul_q(silu_g_i8, ssg, up_i8, su)
         out_i8, so = matvec_q(m['w2'][l], h_i8, sh)
         x = x + from_i8_shift(out_i8, so)
-    # Final rmsnorm en Python (on saute le FPGA rmsnorm pour isoler le matmul)
+    # Final rmsnorm en Python (on skip le FPGA rmsnorm pour isoler le matmul)
     x_norm_i8, sxn = rmsnorm_q(*to_i8_shift(x), m['rms_final'])
     return x_norm_i8, sxn
 
@@ -72,7 +72,7 @@ def main():
     xn_i8, sxn = v4sim_forward_capture(m, token=1, kv_caches=kv_caches, pos=0)
     print(f"  x_norm: min={xn_i8.min()} max={xn_i8.max()} shift={sxn}")
 
-    # 2a. Reference Python : logits = tok_emb @ x_norm avec quantif power-of-2
+    # 2a. reference Python : logits = tok_emb @ x_norm with quantif power-of-2
     print("\n--- Reference Python (v4sim matvec_q) ---")
     logits_ref_i8, sl_ref = matvec_q(m['tok_emb'], xn_i8, sxn)
     logits_ref = from_i8_shift(logits_ref_i8, sl_ref)
@@ -116,7 +116,7 @@ def main():
         argmax_ref = int(top5_ref[0])
         # Quel score donne le FPGA au token 403 (la bonne reponse) ?
         print(f"\n  Token correct {argmax_ref}: ref_logit={logits_ref[argmax_ref]:.2f}, fpga_logit={logits_fpga[argmax_ref]:.2f}")
-        # Rang du token correct dans le ranking FPGA
+        # Rang du token correct in le ranking FPGA
         sort_fpga = np.argsort(-logits_fpga)
         rank_correct = np.where(sort_fpga == argmax_ref)[0][0]
         print(f"  Token correct est rank {rank_correct} dans le FPGA top")

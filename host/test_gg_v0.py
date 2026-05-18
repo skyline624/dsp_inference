@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test GG v0 : embed lookup + rmsnorm layer 0 -> x_norm[64], TOUT en RTL.
+# test GG v0 : embed lookup + rmsnorm layer 0 -> x_norm[64], TOUT en RTL.
 # RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms_att   (6 bytes)
 # TX : 'G' 'K' shift_out x_norm[64]              (67 bytes)
 #
-# Compare avec : tok_emb[tok] (charge en SDRAM par PC) puis rmsnorm sur PC.
+# compare with : tok_emb[tok] (charge en SDRAM par PC) then rmsnorm sur PC.
 
 import time, serial
 import numpy as np
@@ -42,19 +42,19 @@ def main():
     print(f"Load rms_att[0] (sh={sh_rms_att})...")
     sd_load(ser, 0x010000, rms_att_i8.tobytes())
 
-    # 3. Test sur plusieurs tokens, comparer avec ref Python
+    # 3. test sur plusieurs tokens, comparer with ref Python
     test_tokens = [1, 100, 403]
     print(f"\n{'tok':>4s}  {'FPGA shift':10s} {'Ref shift':10s}  {'diff_max':10s}  {'match':6s}")
     n_pass = n_fail = 0
     for tok in test_tokens:
-        # Reference Python
-        x_emb_i8 = tok_emb_i8[tok]   # quantif identique a celle chargee en SDRAM
+        # reference Python
+        x_emb_i8 = tok_emb_i8[tok]   # quantif identical a celle chargee en SDRAM
         xn_ref_i8, sh_n_ref = rmsnorm_q(x_emb_i8, sh_emb, m['rms_att'][0])
 
         # FPGA
         xn_fpga_i8, sh_n_fpga = call_gg_v0(ser, tok, sh_emb, sh_rms_att)
 
-        # Compare en float
+        # compare en float
         xn_ref   = from_i8_shift(xn_ref_i8,  sh_n_ref)
         xn_fpga  = from_i8_shift(xn_fpga_i8, sh_n_fpga)
         diff_max = np.abs(xn_fpga - xn_ref).max()

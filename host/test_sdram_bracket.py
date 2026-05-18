@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Bracketing : trouver a quelle taille la dump CC commence a echouer.
+# Bracketing : trouver a quelle taille la dump CC start a echouer.
 
 import time, sys
 import serial
@@ -26,7 +26,7 @@ def main():
     ser = serial.Serial(PORT, BAUD, timeout=30.0)
     time.sleep(0.5); ser.reset_input_buffer()
 
-    # Test multiple tailles a base addr distincte
+    # test multiple tailles a base addr distincte
     sizes = [4096, 6000, 8000, 10000, 12000, 16000, 17000, 17500, 17800, 17900, 18000, 20000]
     addr = 0x200000
     pattern = bytes([(i * 13 + 7) & 0xFF for i in range(20000)])

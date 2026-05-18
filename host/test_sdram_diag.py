@@ -53,7 +53,7 @@ def main():
     def sd_dump_slow(addr, n):
         return bytes(sd_read_byte(addr+i) for i in range(n))
 
-    # Test 1a : LL + CC (bulk dump)
+    # test 1a : LL + CC (bulk dump)
     print("--- Test 1a: LL load + CC bulk dump (64 bytes) ---")
     nok = 0
     for run in range(20):
@@ -63,7 +63,7 @@ def main():
         if got == data: nok += 1
     print(f"  {nok}/20 OK\n")
 
-    # Test 1b : LL + BB (byte-by-byte dump, robust)
+    # test 1b : LL + BB (byte-by-byte dump, robust)
     print("--- Test 1b: LL load + BB byte-par-byte dump (64 bytes) ---")
     nok = 0
     for run in range(20):
@@ -73,7 +73,7 @@ def main():
         if got == data: nok += 1
     print(f"  {nok}/20 OK\n")
 
-    # Test 1c : WW (byte-by-byte write, robust) + BB
+    # test 1c : WW (byte-by-byte write, robust) + BB
     print("--- Test 1c: WW byte-par-byte + BB byte-par-byte (16 bytes) ---")
     nok = 0
     for run in range(20):
@@ -85,7 +85,7 @@ def main():
         if got == data: nok += 1
     print(f"  {nok}/20 OK\n")
 
-    # Test 2 : FN (rmsnorm with fetch w)
+    # test 2 : FN (rmsnorm with fetch w)
     # On compare le shift_out qui est deterministe a partir de x
     print("--- Test 2: FN (fetch 64 bytes + rmsnorm) ---")
     x_i8 = rng.integers(-30, 30, 64, dtype=np.int8)
@@ -102,7 +102,7 @@ def main():
         if out is not None and out == ref_out: nok += 1
     print(f"  {nok}/20 OK\n")
 
-    # Test 3 : FQ N=8
+    # test 3 : FQ N=8
     print("--- Test 3: FQ N=8 (fetch 8*64 bytes + matmul) ---")
     W = rng.integers(-50, 50, (8, 64), dtype=np.int8)
     x = rng.integers(-50, 50, 64, dtype=np.int8)

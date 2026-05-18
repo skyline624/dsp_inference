@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v1 : embed + rmsnorm + matmul Wq  -> Q[64]
+# test GG v1 : embed + rmsnorm + matmul Wq  -> Q[64]
 # RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms_att sh_q   (7 bytes)
 # TX : 'G' 'K' shift_q Q[64]                          (67 bytes)
 
@@ -44,7 +44,7 @@ def main():
     print(f"\n{'tok':>4s}  {'FPGA shift':10s} {'Ref shift':10s}  {'diff_max':10s}  {'match':6s}")
     n_pass = n_fail = 0
     for tok in test_tokens:
-        # Reference Python : embed[tok] -> rmsnorm -> matvec_q(wq)
+        # reference Python : embed[tok] -> rmsnorm -> matvec_q(wq)
         x_emb_i8 = tok_emb_i8[tok]
         xn_ref_i8, sh_n_ref = rmsnorm_q(x_emb_i8, sh_emb, m['rms_att'][0])
         Q_ref_i8, sh_Q_ref = matvec_q(m['wq'][0], xn_ref_i8, sh_n_ref)

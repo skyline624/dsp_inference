@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test du module attention_head_op sur FPGA (HS=8, T_MAX=8).
+# test du module attention_head_op sur FPGA (HS=8, T_MAX=8).
 # Protocole : 'A''A' sq sk sv T Q[8] K[T*8] V[T*8]
 # Response  : 'A''K' shift_out score_last[2 LE signed] max[1 signed] sum[2 LE] inv_sum[2 LE] out[8]
 # Total reponse = 2+1+2+1+2+2+8 = 18 oct
@@ -94,7 +94,7 @@ def main():
 
     T = 4
 
-    # Test cases
+    # test cases
     cases = []
     # 1. Identite : Q nul -> attn uniforme -> out = mean(V)
     Q = np.zeros(HS, dtype=np.int8)
@@ -102,7 +102,7 @@ def main():
     V = np.array([[1]*HS, [2]*HS, [3]*HS, [4]*HS], dtype=np.int8)
     cases.append(("Q=0 -> attn uniforme, out~mean(V)", Q, K, V))
 
-    # 2. Q aligne avec K[2] (forte attention sur t=2)
+    # 2. Q aligne with K[2] (forte attention sur t=2)
     K2 = np.zeros((T, HS), dtype=np.int8)
     K2[2] = np.array([60, 60, 60, 60, 60, 60, 60, 60], dtype=np.int8)
     Q2 = np.array([60, 60, 60, 60, 60, 60, 60, 60], dtype=np.int8)

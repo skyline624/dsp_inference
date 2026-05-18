@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v2 : embed + rmsnorm + matmuls Q, K, V
+# test GG v2 : embed + rmsnorm + matmuls Q, K, V
 # RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms sh_q sh_k sh_v   (9 bytes)
 # TX : 'G' 'K' sh_q sh_k sh_v Q[64] K[32] V[32]              (133 bytes)
 
@@ -57,7 +57,7 @@ def main():
     n_pass = 0
     for tok in test_tokens:
         print(f"\n=== tok={tok} ===")
-        # Reference Python
+        # reference Python
         x_emb_i8 = tok_emb_i8[tok]
         xn_ref, sh_n = rmsnorm_q(x_emb_i8, sh_emb, m['rms_att'][0])
         Q_ref_i8, sQ_ref = matvec_q(m['wq'][0], xn_ref, sh_n)

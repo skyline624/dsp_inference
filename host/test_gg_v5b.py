@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test GG v5b : v5a + W1 chunk 0 matmul -> h1[0..63]
+# test GG v5b : v5a + W1 chunk 0 matmul -> h1[0..63]
 # RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms sh_q sh_k sh_v sh_o sh_rms_ffn sh_h1  (12 bytes)
 # TX : 'G' 'K' shift_h1 h1[64]                                                    (67 bytes)
 #
-# Compare avec ref Python : v4 (x_after_attn) + rmsnorm_ffn + (W1[0:64,:] @ x_norm_ffn)
+# compare with ref Python : v4 (x_after_attn) + rmsnorm_ffn + (W1[0:64,:] @ x_norm_ffn)
 
 import time, serial
 import numpy as np

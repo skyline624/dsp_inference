@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Suite de non-regression : lance tous les tests qui devraient toujours marcher
-# apres le refactor RTL du 2026-05-18 (T_MAX=32, BSRAM=1024, MM shift fix).
+# Suite de non-regression : lance tous les tests qui devraient always marcher
+# after le refactor RTL du 2026-05-18 (T_MAX=32, BSRAM=1024, MM shift fix).
 #
-# Pour chaque test : capture stdout, parse les marqueurs OK/FAIL.
-# Resume final : tableau de PASS/FAIL avec details.
+# Pour each test : capture stdout, parse les marqueurs OK/FAIL.
+# Resume final : tableau de PASS/FAIL with details.
 
 import subprocess
 import sys
@@ -63,7 +63,7 @@ def main():
         ok, out, dur, why = run_test(script, pattern, tout)
         flag = "PASS" if ok else "FAIL"
         results.append((script, desc, ok, dur, why))
-        # Affiche derniere ligne utile en cas de fail
+        # Affiche last line utile en cas de fail
         if not ok:
             last_lines = [l for l in out.strip().splitlines() if l.strip()][-3:]
             print(f"          {flag}  ({dur:.1f}s)  {why}")

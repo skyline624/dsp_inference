@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v5f : v5e + multiply elementwise -> h_gated[192] (= silu(W1*xn) * (W3*xn))
+# test GG v5f : v5e + multiply elementwise -> h_gated[192] (= silu(W1*xn) * (W3*xn))
 # TX : 'G' 'K' shift h_gated[192]   (195 bytes)
 
 import time, serial

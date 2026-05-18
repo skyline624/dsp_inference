@@ -2,7 +2,7 @@
 # Demo end-to-end : attention block stories260K orchestre par PC, calcul sur FPGA.
 #
 # Pipeline (dim=64, H=8, KH=4, HS=8, pos=0 pour simplicite) :
-#   1. FN(x, rms_w_att) -> x_norm  (rmsnorm sur FPGA avec poids fetched SDRAM)
+#   1. FN(x, rms_w_att) -> x_norm  (rmsnorm sur FPGA with poids fetched SDRAM)
 #   2. FQ(x_norm, wq) -> Q[64]     (matmul Q sur FPGA)
 #   3. FQ(x_norm, wk) -> K[32]     (matmul K)
 #   4. FQ(x_norm, wv) -> V[32]     (matmul V)
@@ -11,7 +11,7 @@
 #   7. FQ(attn_out, wo) -> wo_out[64]    (matmul output)
 #   8. PC : x_new = x + wo_out      (residual)
 #
-# Reference : tout calcule en numpy float, compare au resultat int8 chained.
+# reference : tout computes en numpy float, compare au resultat int8 chained.
 
 import time
 import numpy as np
@@ -65,7 +65,7 @@ def main():
     wv_real = rng.normal(0, 0.1, (KH*HS, D)).astype(np.float32)
     wo_real = rng.normal(0, 0.1, (D, H*HS)).astype(np.float32)    # [64, 64]
 
-    # --- Reference float (numpy) ---
+    # --- reference float (numpy) ---
     def rmsnorm_f(x, w, eps=1e-5):
         return x * w / np.sqrt((x**2).mean() + eps)
     x_norm_ref = rmsnorm_f(x_real, rms_w_real)
@@ -96,7 +96,7 @@ def main():
     wv_i8, sw_v = to_i8_shift(wv_real)
     wo_i8, sw_o = to_i8_shift(wo_real)
 
-    # Load poids dans SDRAM
+    # Load poids in SDRAM
     addr_rms = 0x010000
     addr_wq  = 0x020000
     addr_wk  = 0x030000

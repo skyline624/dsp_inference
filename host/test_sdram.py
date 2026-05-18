@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test SDRAM write/read byte par byte sur le FPGA.
+# test SDRAM write/read byte par byte sur le FPGA.
 # Protocole :
 #   'W''W' addr[3 LE] data(1)  -> 'W''K'              (write)
 #   'B''B' addr[3 LE]          -> 'B''K' data(1)      (read)
@@ -33,7 +33,7 @@ def main():
     time.sleep(0.5); ser.reset_input_buffer()
     print(f"Test SDRAM write/read sur FPGA\n")
 
-    # Test 1 : ecrire + relire UN octet
+    # test 1 : ecrire + relire UN bytes
     print("--- Test 1: ecrire + relire 1 octet ---")
     for addr, data in [(0x000000, 0x42), (0x000010, 0xAB), (0x123456, 0x99)]:
         sd_write(ser, addr, data)
@@ -41,7 +41,7 @@ def main():
         status = "OK" if r == data else f"FAUX (lu {r:#x})"
         print(f"  addr=0x{addr:06X}  ecrit=0x{data:02X}  relu=0x{r:02X}  {status}")
 
-    # Test 2 : pattern sur 32 octets
+    # test 2 : pattern sur 32 bytes
     print("\n--- Test 2: pattern lineaire (32 octets) ---")
     base = 0x001000
     for i in range(32):
@@ -55,7 +55,7 @@ def main():
             nfail += 1
     print(f"  {32-nfail}/32 OK")
 
-    # Test 3 : persistence (relire un octet ecrit au test 1)
+    # test 3 : persistence (relire un bytes ecrit au test 1)
     print("\n--- Test 3: persistence (relire test 1 apres test 2) ---")
     r = sd_read(ser, 0x000000)
     print(f"  addr=0x000000 attendu=0x42 lu=0x{r:02X}  {'OK' if r == 0x42 else 'FAUX'}")

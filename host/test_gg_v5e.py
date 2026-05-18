@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v5e : v5d + silu chunked sur h1 -> silu(h1)[192]
+# test GG v5e : v5d + silu chunked sur h1 -> silu(h1)[192]
 # TX : 'G' 'K' sh_ch0 sh_ch1 sh_ch2 silu(h1)[192]   (197 bytes)
 
 import time, serial
@@ -66,7 +66,7 @@ def main():
         h1_ch0_ref_i8, s0 = matvec_q(m['w1'][0][  0: 64, :], xnf_ref_i8, sh_nf_ref)
         h1_ch1_ref_i8, s1 = matvec_q(m['w1'][0][ 64:128, :], xnf_ref_i8, sh_nf_ref)
         h1_ch2_ref_i8, s2 = matvec_q(m['w1'][0][128:172, :], xnf_ref_i8, sh_nf_ref)
-        # silu sur chaque chunk
+        # silu sur each chunk
         silu0_ref_i8, ss0 = silu_q(h1_ch0_ref_i8, s0)
         silu1_ref_i8, ss1 = silu_q(h1_ch1_ref_i8, s1)
         silu2_ref_i8, ss2 = silu_q(h1_ch2_ref_i8, s2)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Genere la LUT silu(x) = x / (1 + exp(-x)) pour x in [-8, 8).
-# 256 entrees, sortie en Q4.11 (int16 signed, scale 2^-11, max +-16).
+# 256 entrees, output en Q4.11 (int16 signed, scale 2^-11, max +-16).
 # index i correspond a x = (i - 128) / 16.
 
 import numpy as np

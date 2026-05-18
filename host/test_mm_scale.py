@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Debug MM : pour T=1, attn_out = V (single head reorganise). Compare valeurs
+# Debug MM : pour T=1, attn_out = V (single head reorganise). compare values
 # brutes int8 et shift retourne pour identifier d'ou vient le facteur d'echelle.
 
 import time
@@ -18,7 +18,7 @@ def main():
 
     rng = np.random.default_rng(42)
 
-    # Test 1 : Q nul, V predictible. Pour T=1, attn = softmax(0) = 1, donc out = V (repeat).
+    # test 1 : Q nul, V predictible. Pour T=1, attn = softmax(0) = 1, so out = V (repeat).
     print("=== Test MM T=1 : V predictible, Q nul ===\n")
     print("Pour T=1, softmax(any single value) = 1.0, donc attn_out = V repeat selon GQA.\n")
 

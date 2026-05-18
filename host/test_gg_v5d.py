@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v5d : v5c + W3 chunked -> h3[192]
+# test GG v5d : v5c + W3 chunked -> h3[192]
 # RX : 13 bytes ('GG' + tok 2 + 9 shifts), TX : 197 bytes (sh0/1/2 + h3[192])
 
 import time, serial

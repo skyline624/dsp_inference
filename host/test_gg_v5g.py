@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Test GG v5g : v5f + W2 chunked + residual final FFN -> x_after_ffn[64]
-# = layer 0 transformer COMPLET en RTL
+# test GG v5g : v5f + W2 chunked + residual final FFN -> x_after_ffn[64]
+# = layer 0 transformer complete en RTL
 # RX : 13 bytes ('GG' + tok 2 + 10 shifts)  TX : 67 bytes (shift + x_after_ffn[64])
 
 import time, serial
@@ -52,7 +52,7 @@ def main():
     n_pass = 0
     for tok in [1, 100]:
         print(f"\n=== tok={tok} ===")
-        # Ref complete : v4 (x_after_attn) + FFN complet
+        # Ref complete : v4 (x_after_attn) + FFN complete
         x_emb_i8 = tok_emb_i8[tok]
         x_orig = from_i8_shift(x_emb_i8, sh_emb)
         xn_ref, sh_n = rmsnorm_q(x_emb_i8, sh_emb, m['rms_att'][0])

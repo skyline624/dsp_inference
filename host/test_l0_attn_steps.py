@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Decortique chaque step de l'attention block layer 0, pos=0.
-# Pour chaque step : compare la sortie FPGA vs v4sim Python.
+# Decortique each step de l'attention block layer 0, pos=0.
+# Pour each step : compare la output FPGA vs v4sim Python.
 
 import time
 import numpy as np
@@ -58,7 +58,7 @@ def main():
 
     # ─── 2. Q, K, V matmuls ─────────────────────────────────────────────
     print("\nSTEP 2: Q/K/V matmuls (using FPGA x_norm)")
-    # Pour comparer juste le matmul on utilise le MEME input (x_norm FPGA)
+    # Pour comparer juste le matmul on use le same input (x_norm FPGA)
     # ref = matvec_q sur xn_fpga
     Q_ref_i8, sQ_ref = matvec_q(m['wq'][0], xn_fpga, sh_n)
     K_ref_i8, sK_ref = matvec_q(m['wk'][0], xn_fpga, sh_n)
@@ -93,7 +93,7 @@ def main():
     # FPGA
     K_t = K_rope.reshape(1, KH, HS)
     V_t = V_fpga.reshape(1, KH, HS)
-    # Re-align (comme dans attention_block_full)
+    # Re-align (comme in attention_block_full)
     K_send_i8, sKsend = to_i8_shift(np.expand_dims(from_i8_shift(K_t, sKr), 0))
     V_send_i8, sVsend = to_i8_shift(np.expand_dims(from_i8_shift(V_t, sV), 0))
     K_send_i8 = K_send_i8.squeeze(0); V_send_i8 = V_send_i8.squeeze(0)

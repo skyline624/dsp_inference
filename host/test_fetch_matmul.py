@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test FM (matmul avec W fetche depuis SDRAM).
+# test FM (matmul with W fetche from SDRAM).
 # Protocole : 'F''M' N(1) sx sw x[64] addr[3]                    (72 oct envoyes)
 # Reponse   : 'F''M' y[N*4 LE int32]                             (2+4N oct)
 # K=64 hardcode.
@@ -37,7 +37,7 @@ def main():
     rng = np.random.default_rng(42)
     sx, sw = -3, -6
 
-    # Test plusieurs tailles N
+    # test plusieurs tailles N
     for N in [4, 8, 12, 15]:
         W = rng.integers(-50, 50, (N, K), dtype=np.int8)
         x = rng.integers(-50, 50, K, dtype=np.int8)

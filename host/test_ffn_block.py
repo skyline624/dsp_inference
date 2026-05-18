@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Demo end-to-end : FFN (SwiGLU) block, PC-orchestrated, FPGA-computed.
 #
-# Pipeline stories260K-like (D=64, hidden=64 pour rester dans les limites RTL actuelles) :
+# Pipeline stories260K-like (D=64, hidden=64 pour rester in les limites RTL actuelles) :
 #   1. x_norm = FN(x, rms_w_ffn)        rmsnorm sur FPGA
 #   2. h1 = FQ(x_norm, W1)              matmul gate
 #   3. h3 = FQ(x_norm, W3)              matmul up
@@ -10,7 +10,7 @@
 #   6. h_out = FQ(h_gated, W2)          matmul down
 #   7. x_new = x + h_out                 residual
 #
-# Tout le compute lourd (rmsnorm, 3 matmul, silu) est sur FPGA. Le PC ne fait que
+# Tout le compute lourd (rmsnorm, 3 matmul, silu) est sur FPGA. Le PC ne does que
 # le multiply elementwise et le residu (= une op O(D) chacun, marginal).
 
 import time
@@ -56,7 +56,7 @@ def main():
     W3_real    = rng.normal(0, 0.1, (HIDDEN, D)).astype(np.float32)
     W2_real    = rng.normal(0, 0.1, (D, HIDDEN)).astype(np.float32)
 
-    # --- Reference float ---
+    # --- reference float ---
     x_norm_ref = rmsnorm_f(x_real, rms_w_real)
     h1_ref     = W1_real @ x_norm_ref
     h3_ref     = W3_real @ x_norm_ref

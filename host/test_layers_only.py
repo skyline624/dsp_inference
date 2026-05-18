@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Debug : compare x APRES 5 layers FPGA vs APRES 5 layers v4sim Python.
-# Si x match (a la quantif pres), le bug est dans rms_final ou lm_head.
-# Si x differe drastiquement, le bug est dans les layers.
+# Debug : compare x after 5 layers FPGA vs after 5 layers v4sim Python.
+# Si x match (a la quantif pres), le bug est in rms_final ou lm_head.
+# Si x differe drastiquement, le bug est in les layers.
 
 import time, struct
 import numpy as np
@@ -69,7 +69,7 @@ def main():
     L = cfg['n_layers']; HID = cfg['hidden_dim']; S = cfg['seq_len']
     print(f"Model: D={cfg['dim']} hidden={HID} layers={L}")
 
-    # --- Reference v4sim ---
+    # --- reference v4sim ---
     kv_ref = [{'K': np.zeros((S, KH, HS), dtype=np.int8),
                'sK': np.zeros(S, dtype=np.int32),
                'V': np.zeros((S, KH, HS), dtype=np.int8),
@@ -103,7 +103,7 @@ def main():
     print(f"  x_fpga[:8] = {x_fpga[:8].round(3)}")
     print(f"  x_fpga stats: min={x_fpga.min():.2f} max={x_fpga.max():.2f} mean={x_fpga.mean():.3f}")
 
-    # --- Compare ---
+    # --- compare ---
     print(f"\n--- Comparaison ---")
     diff = np.abs(x_fpga - x_ref)
     rel = diff / max(np.abs(x_ref).max(), 1e-9) * 100

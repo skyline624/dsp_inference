@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # =============================================================================
 # infer_v4sim.py
-# Simule v4 ENTIEREMENT en Python avec la contrainte int8 + power-of-2 shift
+# Simule v4 ENTIEREMENT en Python with la contrainte int8 + power-of-2 shift
 # partout (matmuls et activations). Si le texte genere est lisible, la
 # convention numerique est suffisante pour passer au RTL.
 #
-# Pas de FPGA dans ce script - tout calcule en numpy. But : valider la
-# precision avant d'investir dans 2000 lignes de Verilog.
+# Pas de FPGA in ce script - tout computes en numpy. But : valider la
+# precision before d'investir in 2000 lignes de Verilog.
 # =============================================================================
 
 import os, re, struct, sys
@@ -124,18 +124,18 @@ def decode(prev, t, vocab):
     if m: p=bytes([int(m.group(1),16)])
     return p
 
-# ─── Forward avec QUANTIFICATION POWER-OF-2 PARTOUT ──────────────────────
+# ─── Forward with QUANTIFICATION POWER-OF-2 PARTOUT ──────────────────────
 def forward(m, token, kv_caches, pos):
     cfg = m['cfg']
     H,KH,HS,D = cfg['n_heads'],cfg['n_kv_heads'],cfg['head_size'],cfg['dim']
     n_rep = H // KH
 
-    # embedding (reste en float, on quantifie apres)
+    # embedding (reste en float, on quantifie after)
     x = m['tok_emb'][token].astype(np.float32).copy()
 
     for l in range(cfg['n_layers']):
         # ----- ATTN -----
-        # RMSNorm puis quantifie pour les matmuls
+        # RMSNorm then quantifie pour les matmuls
         x_norm_i8, sxn = rmsnorm_q(*to_i8_shift(x), m['rms_att'][l])
 
         Q_i8, sQ = matvec_q(m['wq'][l], x_norm_i8, sxn)
@@ -154,7 +154,7 @@ def forward(m, token, kv_caches, pos):
         kv_caches[l]['K'][pos] = K_i8; kv_caches[l]['sK'][pos] = sK
         kv_caches[l]['V'][pos] = V_i8_2d; kv_caches[l]['sV'][pos] = sV2
 
-        # Attention en float (avec K/V dequantifies depuis cache)
+        # Attention en float (with K/V dequantifies from cache)
         Q_f = from_i8_shift(Q_i8, sQ)
         Ks = np.array([from_i8_shift(kv_caches[l]['K'][p], kv_caches[l]['sK'][p])
                        for p in range(pos+1)])     # (t, KH, HS)

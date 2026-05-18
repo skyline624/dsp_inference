@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Debug : appelle les 8 chunks de la matmul tok_emb un par un pour voir
+# Debug : appelle les 8 chunks de la matmul tok_emb un par un pour see
 # lequel echoue.
 
 import time
@@ -22,7 +22,7 @@ def main():
     ser = serial.Serial(PORT, BAUD, timeout=5.0)
     time.sleep(0.5); ser.reset_input_buffer()
 
-    # Premier FQ "test" pour verifier que le FPGA repond (sur un W simple)
+    # first FQ "test" pour verifier que le FPGA repond (sur un W simple)
     print("Test 1: petit FQ N=8 a addr 0x200000 pour verifier que FPGA est vivant...")
     W_small = np.random.default_rng(0).integers(-30, 30, (8, 64), dtype=np.int8)
     sd_load(ser, 0x200000, W_small.reshape(-1).tobytes())
@@ -37,7 +37,7 @@ def main():
     print(f"tok_emb loaded (sh={sh_emb}), 8 blocks of 4 KiB each")
 
     # Dummy input (x_norm constant pour test rapide)
-    xn_i8 = np.arange(-32, 32, dtype=np.int8)   # 64 valeurs distinctes
+    xn_i8 = np.arange(-32, 32, dtype=np.int8)   # 64 values distinctes
     sxn = -3
 
     print(f"\nx_norm dummy: {xn_i8[:8].tolist()}... shift={sxn}")

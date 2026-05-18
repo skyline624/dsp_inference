@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # =============================================================================
-# v4_quant.py  --  Helpers de quantification int8 + power-of-2 scale.
+# v4_quant.py  --  Quantization helpers: int8 + power-of-2 scale.
 #
-# Convention v4 :
-#   Un tenseur d'activation = (int8 array, shift)
+# v4 convention:
+#   An activation tensor = (int8 array, shift)
 #   real_value = int8_data * 2**shift
 #
-# Avantages : conversions par decalages purs (gratuites en hardware).
-# Choix du shift : on prend le plus petit shift tel que max(|real|) < 128*2^shift,
+# Advantage: conversions are pure shifts (free in hardware).
+# Shift choice: pick the smallest shift such that max(|real|) < 128*2^shift,
 # i.e. shift = ceil(log2(max_abs / 127)).
 #
-# LIMITATION CONNUE : la scale en puissance de 2 perd jusqu'a 1 bit de precision
-# par rapport a une scale fractionnaire. Pour stories260K (35 matmuls chainees)
-# l'erreur cumulee est ~30-40% sur le pire element significatif. Si v4.5
-# produit du texte different de v3e, il faudra passer a une scale Q-format
-# 16-bit (ajoute un petit multiplieur DSP, mais simple).
+# KNOWN LIMITATION: a power-of-2 scale loses up to 1 bit of precision compared
+# to an arbitrary fractional scale. For stories260K (35 chained matmuls) the
+# cumulative error reaches ~30-40% on the worst significant element. If v4.5
+# produces text different from v3e, we'd need to switch to a 16-bit Q-format
+# scale (adds a small DSP multiplier, but simple).
 # =============================================================================
 
 import numpy as np
@@ -34,15 +34,15 @@ def from_i8_shift(x_i8, shift):
     """(int8, shift) -> float64."""
     return x_i8.astype(np.float64) * (2.0 ** shift)
 
-# ─── Re-quantification d'un int32 (apres matmul) en int8+shift ───────────
+# ─── Re-quantification d'un int32 (after matmul) en int8+shift ───────────
 def requantize_i32(y_i32, shift_in):
     """int32 (avec shift_in) -> (int8, shift_out)."""
     max_abs = int(np.max(np.abs(y_i32)))
     if max_abs == 0:
         return np.zeros_like(y_i32, dtype=np.int8), shift_in
-    # nombre de bits a decaler pour rentrer dans int8 signe
+    # nombre de bits a decaler pour rentrer in int8 signe
     add_shift = max(0, int(np.ceil(np.log2(max_abs / 127.0))))
-    # arithmetic right shift (avec arrondi vers le plus proche)
+    # arithmetic right shift (with arrondi to le plus proche)
     half = 1 << (add_shift - 1) if add_shift > 0 else 0
     y_shifted = (y_i32 + half) >> add_shift if add_shift > 0 else y_i32
     y_i8 = np.clip(y_shifted, -128, 127).astype(np.int8)
@@ -67,7 +67,7 @@ def _err(a, b):
 
 def test_roundtrip():
     rng = np.random.default_rng(42)
-    # plusieurs cas avec des plages de valeurs differentes
+    # plusieurs cas with des plages de values differentes
     cases = [
         ("petites valeurs [-0.1, 0.1]",     rng.uniform(-0.1, 0.1, 1024)),
         ("normales N(0,1)",                  rng.normal(0, 1, 1024)),
@@ -112,7 +112,7 @@ def test_chain():
     # ref float
     y_ref = W3 @ (W2 @ (W1 @ x))
 
-    # chaine int8 + re-quantif a chaque etape
+    # chaine int8 + re-quantif a each step
     x_i8, sx = to_i8_shift(x)
     W1_i8, sW1 = to_i8_shift(W1)
     y1_i32 = W1_i8.astype(np.int64) @ x_i8.astype(np.int64)

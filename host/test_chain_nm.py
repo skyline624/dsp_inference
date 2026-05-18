@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test CN : chain rmsnorm + matmul + requantize, tout sur FPGA.
+# test CN : chain rmsnorm + matmul + requantize, tout sur FPGA.
 # Protocole : 'C''N' sx sw_rms sw_mm x[64] N(1) addr_rms[3] addr_mm[3]   (76 oct)
 # Reponse   : 'C''N' shift_total(1) y_int8[N]                            (3+N oct)
 #
-# Reference Python : chaine FN puis FQ sur les memes data. Compare.
+# reference Python : chaine FN then FQ sur les memes data. compare.
 
 import time
 import numpy as np
@@ -38,7 +38,7 @@ def main():
     sx, sw_rms, sw_mm = -3, -6, -6
     N = 8
 
-    # Donnees
+    # data
     x_i8   = rng.integers(-30, 30, 64, dtype=np.int8)
     rms_w  = np.full(64, 64, dtype=np.int8)        # representera 1.0 a shift_w=-6
     mm_W   = rng.integers(-50, 50, (N, 64), dtype=np.int8)
@@ -46,7 +46,7 @@ def main():
     addr_rms = 0x000400
     addr_mm  = 0x000800
 
-    # Reference Python : chaine FN puis FQ via UART (2 commandes)
+    # reference Python : chaine FN then FQ via UART (2 commandes)
     print("Reference : chaine FN + FQ (2 UART calls)...")
     sd_load(ser, addr_rms, rms_w.tobytes())
     sd_load(ser, addr_mm,  mm_W.reshape(-1).tobytes())
@@ -56,12 +56,12 @@ def main():
     print(f"  y_norm shift = {sh_rms_ref:+d}")
     print(f"  y_final ref  = {y_final_ref.tolist()}  shift_total = {st_ref:+d}\n")
 
-    # Test CN
+    # test CN
     print("CN chained on FPGA (1 UART call)...")
     y_cn, st_cn = call_cn(ser, x_i8, sx, sw_rms, sw_mm, N, addr_rms, addr_mm)
     print(f"  y_final fpga = {y_cn.tolist()}  shift_total = {st_cn:+d}\n")
 
-    # Compare
+    # compare
     match_y = np.array_equal(y_cn, y_final_ref)
     match_s = st_cn == st_ref
     print(f"shift_total match : {'OK' if match_s else 'FAUX'}")

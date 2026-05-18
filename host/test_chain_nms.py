@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test CS : chain rmsnorm + matmul + requantize + SiLU.
+# test CS : chain rmsnorm + matmul + requantize + SiLU.
 # Protocole RX comme CN : 'C''S' sx sw_rms sw_mm x[64] N addr_rms[3] addr_mm[3]
 # Reponse : 'C''S' shift_silu y_int8[N]
 #
-# Reference Python : chain FN + FQ + (silu via SS) sur les memes data.
+# reference Python : chain FN + FQ + (silu via SS) sur les memes data.
 
 import time
 import numpy as np

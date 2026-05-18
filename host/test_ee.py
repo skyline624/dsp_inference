@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Test commande EE : embedding lookup.
+# test commande EE : embedding lookup.
 # RX : 'E' 'E' tok_lo tok_hi   (4 bytes)
 # TX : 'E' 'K' x[64]            (66 bytes)
 #
-# Compare avec PC tok_emb[token] apres chargement SDRAM.
+# compare with PC tok_emb[token] after chargement SDRAM.
 
 import time, serial
 import numpy as np
@@ -35,7 +35,7 @@ def main():
     sd_load_matrix_chunked(ser, 0x000000, tok_emb_i8, cfg['vocab_size'], D)
     print("  OK\n")
 
-    # Test plusieurs tokens
+    # test plusieurs tokens
     test_tokens = [0, 1, 17, 100, 256, 403, 511]
     print(f"{'tok':>4s}  {'attendu[:5]':25s}  {'recu[:5]':25s}  {'match':6s}")
     n_pass = n_fail = 0

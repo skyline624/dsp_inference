@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test : attention block avec rope (pos>0) et KV cache, sur plusieurs positions.
+# test : attention block with rope (pos>0) et KV cache, sur plusieurs positions.
 
 import time, serial
 import numpy as np
@@ -36,7 +36,7 @@ def main():
     # Generer une sequence d'inputs (un par position)
     xs = [rng.normal(0, 1, D).astype(np.float32) for _ in range(SEQ_LEN)]
 
-    # Reference Python (KV cache numpy)
+    # reference Python (KV cache numpy)
     kv_ref = {'K': np.zeros((SEQ_LEN, KH, HS), dtype=np.float32),
               'V': np.zeros((SEQ_LEN, KH, HS), dtype=np.float32)}
     outs_ref = []

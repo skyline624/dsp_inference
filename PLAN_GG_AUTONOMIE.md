@@ -1,40 +1,46 @@
-# Plan d'implémentation - Commande GG : inférence autonome 100% FPGA
+# Implementation plan — `GG` command: 100% FPGA autonomous inference
 
-**Objectif final** : Tang Nano 20K génère N tokens stories260K depuis un token de départ, sans aucun calcul PC pendant la génération. PC charge les poids une fois (~5s), puis envoie `GG start_token N`, le FPGA renvoie `N tokens`.
+**End goal**: the Tang Nano 20K generates N stories260K tokens from a seed token, with zero PC compute during generation. The PC loads weights once (~5 s), then sends `GG start_token N`; the FPGA returns N tokens.
 
-## État actuel (2026-05-18)
+## Current status (2026-05-18)
 
-✅ **GG v0** : embed + rmsnorm L0 → x_norm[64]
-✅ **GG v1** : + matmul Wq → Q[64], cos > 0.99
+- ✅ **GG v0**: embed + rmsnorm L0 → x_norm[64]
+- ✅ **GG v1**: + Wq → Q[64], cos > 0.99
+- ✅ **GG v2**: + Wk, Wv → K[32], V[32]
+- ✅ **GG v3**: + multi-head attention (T=1, pos=0)
+- ✅ **GG v4**: + Wo + residual
+- ✅ **GG v5a-f**: + rmsnorm FFN + W1/W3 chunked + silu chunked + elementwise multiply
+- 🔴 **GG v5g**: W2 chunked + final residual — output 25× too small, needs debugging
+- 🚧 **v6-v8**: remaining
 
-**Pattern validé** : FSM RTL qui chaîne embed → rmsnorm → copy obuf→xbuf → setup FQ → FQ → TX. Le flag `gg_active` route le retour du flow FQ existant vers la branche GG. Évite de dupliquer du RTL.
+**Validated pattern**: RTL FSM that chains embed → rmsnorm → copy obuf→xbuf → setup FQ → FQ → TX. The `gg_active` flag routes the return of the existing FQ flow to the GG branch. Avoids duplicating RTL.
 
-## Architecture cible
+## Target architecture
 
 ```
-Commande PC :   GG start_tok N
-                ↓
-FPGA FSM :      pos=0, tok=start_tok
-                ┌──── boucle N fois ────────────────────┐
-                │ 1. embed lookup → x[64]               │
-                │ 2. ┌── boucle 5 layers ─────────────┐ │
-                │    │ ATT : rmsnorm → Q/K/V → rope  │ │
-                │    │       → write KV cache SDRAM  │ │
-                │    │       → read KV[0..pos] SDRAM │ │
-                │    │       → MM → Wo → residual    │ │
-                │    │ FFN : rmsnorm → W1/W3 chunked │ │
-                │    │       → silu → multiply       │ │
-                │    │       → W2 chunked → residual │ │
-                │    └────────────────────────────────┘ │
-                │ 3. final rmsnorm → lm_head → argmax   │
-                │ 4. TX tok, tok=new_tok, pos++         │
-                └────────────────────────────────────────┘
-                TX_DONE
+PC command:    GG start_tok N
+               ↓
+FPGA FSM:      pos=0, tok=start_tok
+               ┌──── loop N times ────────────────────┐
+               │ 1. embed lookup → x[64]              │
+               │ 2. ┌── loop 5 layers ─────────────┐  │
+               │    │ ATT: rmsnorm → Q/K/V → rope  │  │
+               │    │      → write KV cache SDRAM  │  │
+               │    │      → read KV[0..pos] SDRAM │  │
+               │    │      → MM → Wo → residual    │  │
+               │    │ FFN: rmsnorm → W1/W3 chunked │  │
+               │    │      → silu → multiply       │  │
+               │    │      → W2 chunked → residual │  │
+               │    └───────────────────────────────┘  │
+               │ 3. final rmsnorm → lm_head → argmax  │
+               │ 4. TX tok, tok=new_tok, pos++        │
+               └──────────────────────────────────────┘
+               TX_DONE
 ```
 
-## Adresses hardcodées (déjà dans top.v ou à ajouter)
+## Hardcoded addresses (already in top.v or to add)
 
-| Const | Adresse | Contenu |
+| Const | Address | Content |
 |---|---|---|
 | ADDR_TOK_EMB | 0x000000 | tok_emb [512, 64] (32 KiB) |
 | ADDR_RMS_ATT_LX | 0x010000 + L*0x10000 | rms_att[L] (64 B) |
@@ -47,246 +53,144 @@ FPGA FSM :      pos=0, tok=start_tok
 | ADDR_W3_LX | base + 0x6200 | w3[L] [172, 64] chunked (12 KiB) |
 | ADDR_W2_LX | base + 0x9200 | w2[L] [64, 172] chunked (12 KiB) |
 | ADDR_RMS_FINAL | 0x060000 | rms_final (64 B) |
-| ADDR_KV_K | 0x300000 | KV cache K : 5 layers × 32 pos × 32 B = 5 KiB |
-| ADDR_KV_V | 0x301400 | KV cache V : idem |
+| ADDR_KV_K | 0x300000 | KV cache K: 5 layers × 32 pos × 32 B = 5 KiB |
+| ADDR_KV_V | 0x301400 | KV cache V: idem |
 
-`base = 0x010000 + L*0x10000` pour layer L
+`base = 0x010000 + L*0x10000` for layer L
 
-## Étapes incrémentales
+## Remaining incremental steps
 
-### GG v2 — Ajout matmuls K et V (~30 min)
+### GG v5g — debug W2 chunked + residual (in progress)
 
-**Objectif** : après Q, calculer K[32] et V[32], renvoyer les 3 + shifts pour validation.
+**Symptom**: output 25× too small (fpga[1]=0.062 vs ref -1.403, cos < 0).
 
-**RTL** :
-- Nouveau reg packed `kv_save_packed [0:511]` (64 bytes = 32 K + 32 V)
-- Nouveaux states : `S_GG_SAVE_Q`, `S_GG_SETUP_K`, `S_GG_AFTER_K`, `S_GG_SETUP_V`, `S_GG_AFTER_V`
-- Après FQ Q done (branche gg_active) : copy obuf → Q_packed (8 bytes/cycle ou loop)
-- Puis SETUP_K : sd_addr=ADDR_WK_LX, fm_N=32 (KH*HS), trigger FQ
-- Après FQ K : copy obuf[0..31] → kv_save_packed[0..31]
-- Puis SETUP_V : sd_addr=ADDR_WV_LX, fm_N=32, trigger FQ
-- Après FQ V : copy obuf[0..31] → kv_save_packed[32..63]
-- TX étendu : 'GK' sh_q sh_k sh_v Q[64] K[32] V[32] = 131 bytes
-- RX : ajouter sh_k, sh_v (RX 9 bytes total)
+**Hypotheses**:
+1. W2 chunked load h_gated → xbuf: 1-cycle BSRAM read may be insufficient
+2. 3-way sum via sequential BSRAM reads through 6 sub-states FRR_*P0/P1/P2: cycle timing issue
+3. Requantize after sum: `rms_shift_x = sh_min` formula may be wrong
 
-**Test** : `test_gg_v2.py` — compare Q/K/V FPGA vs ref Python avec cos > 0.95.
+**Debug strategy**: add intermediate TX states to dump partials, sum_i32, etc.
 
-**Risque** : la latence BSRAM 2 cycles pour la copie. Bien insérer les états W1/W2.
+### GG v6 — 5-layer loop (~45 min)
 
----
+**Goal**: run v2-v5 for layer 0, then layer 1, etc. up to 4.
 
-### GG v3 — Multi-head attention pos=0, T=1 (~45 min)
-
-**Objectif** : ajouter rope (no-op pour pos=0) + MM module pour calculer attn_out[64].
-
-**RTL** :
-- Skip rope (pos=0 → identité, juste sauter cette phase)
-- Nouveaux states : `S_GG_SETUP_MM`, `S_GG_RUN_MM`, `S_GG_SAVE_ATTN`
-- SETUP_MM : copier Q_packed → Q_flat (déjà fait : Q_flat = Q_packed est un wire), copier kv_save[0..31] → xbuf[0..31] (K pour MM), kv_save[32..63] → wbuf[0..31] (V pour MM), set `attn_kv_stride=32`, `attn_T=1`, `attn_shift_q/k/v` depuis regs sauvés
-- RUN_MM : pour h=0..7, configure kv_offset, attn_start=1, attend done, copy obuf[0..7] → Out_packed[h*64+..]
-  - **Note** : structure déjà présente dans S_MM_HEAD/COPY/NEXT pour la commande MM standalone, réutilisable
-- Après MM : `attn_out` dans Out_packed (64 bytes)
-- TX adapté : 'GK' sh_attn attn_out[64] = 67 bytes
-- RX : pas de nouveaux shifts (sh_q/k/v déjà reçus en v2)
-
-**Test** : `test_gg_v3.py` — compare attn_out FPGA vs ref Python (cos > 0.95).
-
-**Risque** : la séquence multi-head loop dans GG (vs dans la commande MM). Réutiliser au max les states MM existants en factorisant.
-
-**Variante future** (pos>0)** : ajouter freq_cis en SDRAM (256 bytes) + un sous-FSM rope par head. Pour pos=0 c'est skipped.
-
----
-
-### GG v4 — Wo matmul + residual (~30 min)
-
-**Objectif** : finir l'attention block layer 0 → x_after_attn[64].
-
-**RTL** :
-- Nouveau reg packed `x_save_packed [0:511]` (64 bytes) pour sauver l'embed (résidu d'entrée)
-- Au début de GG (après embed lookup), copier xbuf[0..63] → x_save_packed
-- Après MM (attn_out dans Out_packed) : copy Out_packed → xbuf, SETUP_WO, FQ, → résultat dans obuf
-- Nouveau sous-FSM **RESIDUAL** :
-  - États : `S_GG_RES_INIT`, `S_GG_RES_LOOP`, `S_GG_RES_REQUANT`
-  - Pour i=0..63 : 
-    - lit x_save_packed[i] (shift = sh_emb) et obuf[i] (shift = sh_wo)
-    - convertit en int16 aligné au shift min(sh_emb, sh_wo)
-    - somme : int16_sum[i] = x_aligned + out_aligned
-  - Find max_abs sur les 64 sums
-  - Requantize : x_after_attn_i8[i] = sum_int16 >> add_shift, sh_new = min_shift + add_shift
-- Save x_after_attn dans x_save_packed (pour le résidu FFN)
-- TX : 'GK' sh_x_attn x_attn[64] = 67 bytes
-
-**Risque** : l'addition int16 avec alignement de shift est délicate. Bien faire les sign-extends.
-
-**Test** : `test_gg_v4.py` — compare x_after_attn FPGA vs ref Python.
-
----
-
-### GG v5 — FFN complète (~1h, le plus complexe)
-
-**Objectif** : ajouter rmsnorm_ffn + W1/W3 + silu + multiply + W2 + residual → x_after_ffn[64].
-
-**RTL** :
-- rmsnorm_ffn : copy x_after_attn → xbuf, fetch rms_ffn → wbuf, run rmsnorm
-- W1 et W3 (chunked N=172) :
-  - Loop 3 sub-matmuls (N=64, 64, 44)
-  - Stocker chaque chunk dans un buffer (h1/h3_packed [0:172*8-1] = 172 bytes chaque... ou utiliser xbuf zones)
-  - Maintenir shift global (re-align en float-like via shifts)
-- silu sur h1 (chunked 64 par 64) → h1_silu
-- **multiply elementwise** h1_silu[i] * h3[i] pour i=0..171 :
-  - States : pour i loop, mul = h1_silu[i] * h3[i] (int8*int8 = int16), find max_abs, requantize
-- W2 (chunked K=172, N=64) :
-  - **Accumuler les partial sums** : pas de requantize entre chunks
-  - 3 sub-matmuls qui sommes dans un commun y_int32_accum [0:63]
-  - Après tous chunks : requantize, sortie int8[64]
-- Residual : x_after_attn + W2_out → x_after_ffn (réutilise sous-FSM RESIDUAL de v4)
-- Save x_after_ffn dans x_save_packed (pour le layer suivant en v6)
-- TX : 'GK' sh_x_ffn x_ffn[64]
-
-**Difficultés** :
-1. **Chunking N=172 pour W1/W3** : 3 sub-matmuls, gestion des shifts par chunk. Storage ~172 × 16 bits = 2752 bits (regs packed). OK.
-2. **Chunking K=172 pour W2** : sub-matmuls qui accumulent dans y_int32 sans requantize. Modifier FQ pour avoir un flag `accumulate_mode`. OU faire le matmul "manuellement" dans le FSM GG (sans le module FQ).
-3. **Multiply elementwise** sur 172 valeurs avec gestion shift. ~80 lignes RTL.
-
-**Test** : `test_gg_v5.py` — compare x_after_ffn FPGA vs ref Python.
-
----
-
-### GG v6 — Boucle 5 layers (~45 min)
-
-**Objectif** : exécuter v2-v5 pour layer 0, puis layer 1, etc. jusqu'à 4.
-
-**RTL** :
-- Compteur `layer_idx [2:0]` (0..4)
-- Calcul d'adresses par layer :
-  ```
+**RTL**:
+- Counter `layer_idx [2:0]` (0..4)
+- Per-layer address computation:
+  ```verilog
   wire [22:0] base_layer = 23'h010000 + ({4'd0, layer_idx, 16'd0});
   wire [22:0] addr_rms_att_L = base_layer + 23'h0000;
   wire [22:0] addr_wq_L      = base_layer + 23'h0100;
   // ... etc
   ```
-- Remplacer toutes les constantes ADDR_*_L0 par addr_*_L dans la FSM v2-v5
-- À la fin de v5 (x_after_ffn dans x_save_packed) : 
-  - if layer_idx < 4 : layer_idx++, x_save_packed devient l'input de la couche suivante, recommencer à embed/rmsnorm de la nouvelle couche
-  - else : passer à v7 (final norm + lm_head)
-- Note : embed lookup n'est fait QUE au layer 0. Layers 1..4 commencent par rmsnorm_att avec x_save_packed comme input.
+- Replace all ADDR_*_L0 constants with addr_*_L in the v2-v5 FSM
+- At end of v5 (x_after_ffn in x_save_packed):
+  - if layer_idx < 4: layer_idx++, x_save_packed becomes the next layer's input, restart at rmsnorm_att
+  - else: jump to v7 (final norm + lm_head)
+- Note: embed lookup runs ONLY at layer 0. Layers 1..4 start with rmsnorm_att using x_save_packed as input.
 
-**Test** : `test_gg_v6.py` — compare x après 5 layers FPGA vs ref Python.
+### GG v7 — final norm + lm_head + argmax → token (~45 min)
 
-**Risque** : la complexité d'adressage et le risque de bug dans le calcul de base_layer (pile/mauvais layer écrasé).
+**Goal**: after 5 layers, compute the next token.
 
----
-
-### GG v7 — Final norm + lm_head + argmax → token (~45 min)
-
-**Objectif** : après 5 layers, calculer le token suivant.
-
-**RTL** :
-- rms_final : sd_addr=ADDR_RMS_FINAL, run rmsnorm
-- lm_head : matmul vocab=512 avec poids = tok_emb (chunked N=8) :
-  - 8 sub-matmuls de N=64 (input dim 64, output 64)
-  - Chaque sub-matmul produit logits[chunk*64..(chunk+1)*64] avec son shift
-- **Argmax avec shifts différents** :
-  - Reg : `argmax_val [signed 8:0]`, `argmax_idx [9:0]`, `argmax_shift [signed 7:0]`
-  - Initialize argmax_val = -128, argmax_shift = -128 (très petit)
-  - Pour chaque chunk c, pour chaque i=0..63 :
+**RTL**:
+- rms_final: sd_addr=ADDR_RMS_FINAL, run rmsnorm
+- lm_head: vocab=512 matmul with weights = tok_emb (chunked into 8 sub-matmuls of N=64):
+  - 8 sub-matmuls of N=64 (input dim 64, output 64)
+  - Each sub-matmul produces logits[chunk*64..(chunk+1)*64] with its own shift
+- **Argmax with mismatched shifts**:
+  - Regs: `argmax_val [signed 8:0]`, `argmax_idx [9:0]`, `argmax_shift [signed 7:0]`
+  - Initialize argmax_val = -128, argmax_shift = -128 (very small)
+  - For each chunk c, for each i=0..63:
     - logit_int = obuf[i], logit_shift = fq_shift_total
-    - Compare (logit_int, logit_shift) vs (argmax_val, argmax_shift) :
-      - if logit_shift > argmax_shift : rescale argmax_val = argmax_val >> (logit_shift - argmax_shift), argmax_shift = logit_shift
-      - else if logit_shift < argmax_shift : rescale logit_int = logit_int >> (argmax_shift - logit_shift)
+    - Compare (logit_int, logit_shift) vs (argmax_val, argmax_shift):
+      - if logit_shift > argmax_shift: rescale argmax_val = argmax_val >> (logit_shift - argmax_shift), argmax_shift = logit_shift
+      - else if logit_shift < argmax_shift: rescale logit_int = logit_int >> (argmax_shift - logit_shift)
       - then compare int values
-    - if new > current : update argmax_val, argmax_idx = c*64+i, argmax_shift
-  - Après tous les chunks : argmax_idx = token_id
-- TX : 'GK' tok_lo tok_hi = 4 bytes
+    - if new > current: update argmax_val, argmax_idx = c*64+i, argmax_shift
+  - After all chunks: argmax_idx = token_id
+- TX: 'GK' tok_lo tok_hi = 4 bytes
 
-**Difficulté** : la comparaison cross-shifts. Une simplification : forcer tous les chunks à utiliser le même shift (passer un shift_force au FQ) — perd de la précision mais simplifie.
+**Tradeoff**: cross-shift comparison is fiddly. A simpler approach forces all chunks to use the same shift (pass shift_force to FQ) — loses precision but simplifies.
 
-**Test** : `test_gg_v7.py` — comparaison du token argmax FPGA vs ref Python pour quelques inputs. Doit matcher pour tok=1 (start) = 403 ("Once").
+### GG v8 — KV cache SDRAM + N-token loop (~1 h)
 
----
+**Goal**: full autonomy. PC sends `GG start_token N`, FPGA returns N tokens.
 
-### GG v8 — KV cache SDRAM + boucle N tokens (~1h)
-
-**Objectif** : autonomie totale. PC envoie `GG start_token N`, FPGA renvoie N tokens.
-
-**RTL** :
-- Reg `pos [5:0]` (0..31) compteur de position
-- Reg `n_tokens [5:0]` (N à générer)
-- Reg `current_token [9:0]` (le prochain token à embed)
-- RX étendu : 'GG' tok_lo tok_hi N + shifts (15+ bytes)
-- À chaque itération de génération :
-  - Reset gg_active sous-flags
+**RTL**:
+- Reg `pos [5:0]` (0..31) position counter
+- Reg `n_tokens [5:0]` (N to generate)
+- Reg `current_token [9:0]` (next token to embed)
+- Extended RX: 'GG' tok_lo tok_hi N + shifts (15+ bytes)
+- Each generation iteration:
+  - Reset gg_active sub-flags
   - Embed current_token → x_save_packed
-  - **Pour chaque layer** : ATT (avec KV cache) puis FFN
-- **KV cache** : à chaque attention, après rope :
-  - WRITE K[pos], V[pos] à `ADDR_KV_K + L*32*32 + pos*32` (32 bytes pour les 4 heads × 8 HS)
-  - DMA write 32 bytes vers SDRAM
-- **Lecture KV cache pour MM** :
-  - Avant MM, fetch K[0..pos] depuis SDRAM vers xbuf : (pos+1)*32 bytes = boucle DMA
-  - Fetch V[0..pos] vers wbuf : idem
-  - Lancer MM avec attn_T = pos+1
-- **Rope pour pos>0** : 
-  - Charger freq_cis_real/imag pour position pos (depuis SDRAM table ou recompute via LUT)
-  - Pour chaque head H de Q et chaque head KH de K, lancer rope_op
-  - **Alternatif simple** : précomputer freq_cis pour pos=0..31 et stocker en SDRAM (32 × 4 × 4 = 512 bytes pour cos+sin Q15)
+  - **For each layer**: ATT (with KV cache) then FFN
+- **KV cache**: at each attention, after rope:
+  - WRITE K[pos], V[pos] to `ADDR_KV_K + L*32*32 + pos*32` (32 bytes for the 4 heads × 8 HS)
+  - DMA write 32 bytes to SDRAM
+- **KV cache read for MM**:
+  - Before MM, fetch K[0..pos] from SDRAM to xbuf: (pos+1)*32 bytes = DMA loop
+  - Fetch V[0..pos] to wbuf: same
+  - Launch MM with attn_T = pos+1
+- **Rope for pos>0**:
+  - Load freq_cis_real/imag for position pos (from SDRAM table or recompute via LUT)
+  - For each Q head H and each K head KH, launch rope_op
+  - **Simpler alternative**: precompute freq_cis for pos=0..31 and store in SDRAM (32 × 4 × 4 = 512 bytes for Q15 cos+sin)
 - Argmax → next_token, TX next_token, current_token = next_token, pos++
-- if pos == n_tokens : send DONE marker, return to IDLE
-- else : recommencer la boucle
+- if pos == n_tokens: send DONE marker, return to IDLE
+- else: restart the loop
 
-**TX format** : `GS` (Generation Start) puis N × 2 bytes (chaque token), puis `GD` (Generation Done). PC reçoit en streaming.
+**TX format**: `GS` (Generation Start) then N × 2 bytes (each token), then `GD` (Generation Done). PC receives a stream.
 
-**Test** : `test_gg_v8.py` — appel `GG 1 17` → reçoit 17 tokens, comparaison avec v4sim. Devrait produire `Once upon a time, there was a little gir mommy. The bo` ou équivalent.
+**Main difficulty**: KV cache orchestration + multi-head rope + state persistence between tokens.
 
-**Difficulté principale** : orchestration KV cache + rope multi-head + persistance d'état entre tokens.
+## Test strategy per step
 
-## Stratégie de test après chaque étape
-
-Pour chaque GG vX :
+For each GG vX:
 1. Code RTL (~30-60 min)
 2. Build (`gw_sh build.tcl`) — 6 min
 3. Reflash (`programmer_cli`) — 10 sec
-4. Test Python `test_gg_vX.py` — compare avec référence Python infer_v4sim
-5. Si OK : ajouter au `run_regression.py`
-6. Mettre à jour memory
+4. Python test `test_gg_vX.py` — compare with the infer_v4sim Python reference
+5. If OK: add to `run_regression.py`
+6. Update memory
 
-## Pièges connus à éviter
+## Known pitfalls to avoid
 
-1. **`cur_shift_out` mux** : tout nouvel op qui produit un shift output doit être dans le mux ligne ~671 de top.v
-2. **`rx_consume` list** : tout nouvel état qui RX doit être listé ligne ~641
-3. **Adresses SDRAM modulo BSRAM_SZ=1024** : xbuf/wbuf sont 1024 bytes maintenant, pas 128
-4. **MM T_MAX=32** : OK pour seq_len 32 (cf. v4.5t)
-5. **Quantization shift sur frontière** : peut donner ±1 bit de diff entre FPGA et ref Python (LUT 1/sqrt approxime). Tolérance > 5% acceptable.
-6. **`gg_active` clear** : penser à le remettre à 0 dans S_TX_O_W quand retour à S_IDLE
-7. **op_sel restore** : quand on bascule en op_fm pour FQ depuis GG, penser à restaurer op_sel=10 avant les TX states GG
+1. **`cur_shift_out` mux**: any new op that produces an output shift must be in the mux around line 671 of top.v
+2. **`rx_consume` list**: any new RX state must be listed around line 641
+3. **SDRAM addresses modulo BSRAM_SZ=1024**: xbuf/wbuf are 1024 bytes now, not 128
+4. **MM T_MAX=32**: OK for seq_len 32 (see v4.5t)
+5. **Quantization shift on boundaries**: can give ±1 bit diff between FPGA and Python ref (the 1/sqrt LUT approximates). Tolerance > 5% is acceptable.
+6. **`gg_active` clear**: remember to reset it to 0 in S_TX_O_W when returning to S_IDLE
+7. **op_sel restore**: when switching to op_fm for FQ from GG, remember to restore op_sel=10 before the GG TX states
 
-## Time budget (estimation)
+## Time budget (estimate)
 
-| Étape | Temps |
+| Step | Time |
 |---|---|
-| GG v2 | 30 min |
-| GG v3 | 45 min |
-| GG v4 | 30 min |
-| GG v5 | 1h |
+| GG v5g debug | 1 h |
 | GG v6 | 45 min |
 | GG v7 | 45 min |
-| GG v8 | 1h |
-| **Total** | **~5h15 de travail effectif** |
+| GG v8 | 1 h |
+| **Total** | **~3.5 h of effective work** |
 
-À ajouter : ~50 min de builds (8 × 6 min) sur le total.
+Add ~24 min of builds (4 × 6 min) on top.
 
-## Critère de succès final
+## Success criterion
 
 ```bash
-# PC (juste pour charger les poids 1 fois) :
-python load_weights.py   # ~5s, charge tout en SDRAM
-# Puis :
-python generate.py 17    # envoie GG 1 17, attend, reçoit 17 tokens, affiche le texte
+# PC (just to load weights once):
+python load_weights.py   # ~5 s, loads everything into SDRAM
+# Then:
+python generate.py 17    # sends GG 1 17, waits, receives 17 tokens, prints text
 
-# Sortie attendue :
+# Expected output:
 "Once upon a time, there was a little gir mommy. The bo"
-# (équivalent à infer_fpga.py mais SANS aucun calcul Python pendant la génération)
+# (matches infer_fpga.py but WITHOUT any Python compute during generation)
 ```
 
-Throughput estimé : ~5-10 tok/s (limité par UART pour TX seulement, plus de RTT par token).
-Vs infer_fpga actuel : ~0.36 tok/s (limité par 30 RTT par token).
-**Speedup : ×10-30**.
+Estimated throughput: ~5-10 tok/s (UART-bound for TX only, no per-token RTT).
+Vs current infer_fpga: ~0.36 tok/s (30 RTTs per token).
+**Speedup: ×10-30**.

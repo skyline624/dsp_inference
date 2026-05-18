@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================================
-# infer_fpga.py - Vraie inference stories260K sur FPGA Tang Nano 20K.
-# Tout le compute lourd (matmul, rmsnorm, silu, rope, attention) est sur FPGA.
-# Le PC orchestre, charge les poids en SDRAM, et fait quelques ops mineures
-# (multiply elementwise dans le FFN, residuals, sampling argmax).
+# infer_fpga.py - Real stories260K inference on the Tang Nano 20K FPGA.
+# All the heavy compute (matmul, rmsnorm, silu, rope, attention) runs on FPGA.
+# The PC orchestrates, loads the weights into SDRAM, and performs a few minor
+# operations (elementwise multiply in the FFN, residuals, argmax sampling).
 # =============================================================================
 
 import os, struct, re, time, sys
@@ -95,7 +95,7 @@ def quantize_and_load_weights(ser, m):
     for l in range(L):
         base = 0x010000 + l * 0x10000
         print(f"  - layer {l} @ {base:06x}...")
-        # attn (addresses dans les 8 premiers KiB)
+        # attn (addresses in les 8 premiers KiB)
         rms_att_i8, sh_ra = to_i8_shift(m['rms_att'][l])
         wq_i8, sh_q = to_i8_shift(m['wq'][l])
         wk_i8, sh_k = to_i8_shift(m['wk'][l])
@@ -132,12 +132,12 @@ def quantize_and_load_weights(ser, m):
         })
     return weights
 
-# ─── Boucle d'inference ──────────────────────────────────────────────────
+# ─── loop d'inference ──────────────────────────────────────────────────
 def forward_fpga(ser, m, w, token, kv_caches, pos, freq_cis):
     """Un step forward complet : token -> logits[vocab]."""
     cfg = m['cfg']
     L = cfg['n_layers']; HID = cfg['hidden_dim']; V = cfg['vocab_size']
-    # 1. Embed (lookup direct depuis tok_emb float en RAM PC)
+    # 1. Embed (lookup direct from tok_emb float en RAM PC)
     x_real = w['tok_emb_real'][token].astype(np.float32).copy()
     x_i8, sx = to_i8_shift(x_real)
     # 2. 5 layers : attn + ffn
@@ -145,7 +145,7 @@ def forward_fpga(ser, m, w, token, kv_caches, pos, freq_cis):
         x_i8, sx = attention_block_full(ser, x_i8, sx, w['layers'][l]['attn'],
                                          pos, kv_caches[l], freq_cis)
         x_i8, sx = ffn_block_full(ser, x_i8, sx, w['layers'][l]['ffn'], hidden=HID)
-    # 3. lm_head : rms_final + matmul vers vocab=512
+    # 3. lm_head : rms_final + matmul to vocab=512
     logits = lm_head(ser, x_i8, sx, w['lm_head'], vocab=V)
     return logits
 

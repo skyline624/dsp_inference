@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Operations transformer reutilisables : attention block, FFN block, lm_head.
-# Tout le compute lourd va sur FPGA via UART (FN/FQ/SS/MM/RR).
-# Le chunking permet de gerer hidden=172 et vocab=512 sans bumper le RTL.
+# Reusable transformer ops: attention block, FFN block, lm_head.
+# All heavy compute runs on the FPGA via UART (FN/FQ/SS/MM/RR).
+# Chunking lets us handle hidden=172 and vocab=512 without bumping the RTL.
 
 import numpy as np
 from test_sdram_diag import sd_load, call_fn, call_fq
@@ -9,7 +9,7 @@ from v4_quant import to_i8_shift, from_i8_shift
 
 D, H, KH, HS = 64, 8, 4, 8
 N_REP = H // KH
-FQ_MAX_N = 64    # limite RTL : sortie obuf
+FQ_MAX_N = 64    # limite RTL : output obuf
 FQ_K     = 64    # limite RTL : xbuf
 
 def i8(b): return b - 256 if b >= 128 else b
@@ -51,7 +51,7 @@ def call_mm_pc(ser, Q_i8, K_i8, V_i8, sq, sk, sv, T=1):
     out = np.einsum('ht,thd->hd', attn_w, V_rep).reshape(D)
     return to_i8_shift(out)
 
-# Par defaut : utilise FPGA MM (apres fix RTL 2026-05-18 : T_MAX=32, shift fixe).
+# Par defaut : use FPGA MM (after fix RTL 2026-05-18 : T_MAX=32, shift fixe).
 # Fallback PC si bug : call_mm = call_mm_pc.
 call_mm = call_mm_fpga_raw
 
@@ -80,7 +80,7 @@ def call_rr(ser, x_i8, sx, cos_f, sin_f):
     so = i8(resp[2])
     return np.frombuffer(resp[11:], dtype=np.int8), so
 
-# ─── Matmul avec chunking pour contourner limites RTL ─────────────────────
+# ─── Matmul with chunking pour contourner limites RTL ─────────────────────
 def matvec_chunked_N(ser, x_i8, sx, sw, addr_W, N_total, K=FQ_K):
     """W [N_total, K] @ x [K] -> y [N_total], avec N_total > FQ_MAX_N.
        Decoupe en sous-matmul de N=FQ_MAX_N max, ré-aligne shifts en float, requantize.
@@ -91,12 +91,12 @@ def matvec_chunked_N(ser, x_i8, sx, sw, addr_W, N_total, K=FQ_K):
     pos = 0
     while pos < N_total:
         n = min(FQ_MAX_N, N_total - pos)
-        # Si n < FQ_MAX_N on doit appeler FQ avec N=n. FQ supporte N variable.
+        # Si n < FQ_MAX_N on doit appeler FQ with N=n. FQ supporte N variable.
         y_i8, sy = call_fq(ser, n, sx, sw, x_i8, addr_W + pos * K)
         chunks.append(y_i8)
         shifts.append(sy)
         pos += n
-    # Re-aligner : dequantize chaque chunk en float, concatenate, requantize
+    # Re-aligner : dequantize each chunk en float, concatenate, requantize
     y_real = np.concatenate([from_i8_shift(c, s) for c, s in zip(chunks, shifts)])
     return to_i8_shift(y_real)
 
@@ -112,7 +112,7 @@ def matvec_chunked_K(ser, x_i8, sx, sw, addr_W, N, K_total):
     chunk_idx = 0
     while k_pos < K_total:
         kc = min(FQ_K, K_total - k_pos)
-        # Si kc < FQ_K il faut padder x avec des zeros (les W correspondants
+        # Si kc < FQ_K il faut padder x with des zeros (les W correspondants
         # sont supposes padder a 0 lors du sd_load)
         x_chunk = np.zeros(FQ_K, dtype=np.int8)
         x_chunk[:kc] = x_i8[k_pos:k_pos+kc]
@@ -153,7 +153,7 @@ def matvec_chunked_NK(ser, x_i8, sx, sw, addr_W, N_total, K_total):
     y_real = np.concatenate(chunks)
     return to_i8_shift(y_real)
 
-# ─── Helper : load une matrice en chunks dans la SDRAM ────────────────────
+# ─── Helper : load une matrice en chunks in la SDRAM ────────────────────
 def sd_load_matrix_chunked(ser, addr, W_i8, N, K):
     """Charge W [N, K] en SDRAM, decoupee en chunks [min(FQ_MAX_N, N), FQ_K].
        Si N>64 ou K>64, on padde a 64 pour chaque chunk.
@@ -171,7 +171,7 @@ def sd_load_matrix_chunked(ser, addr, W_i8, N, K):
             n0 = n_idx * FQ_MAX_N
             n1 = min(n0 + FQ_MAX_N, N)
             block = np.zeros((FQ_MAX_N, FQ_K), dtype=np.int8)
-            # Pour le matmul FQ : W[n, k] avec input x[k]. On range tel que
+            # Pour le matmul FQ : W[n, k] with input x[k]. On range tel que
             # le row-major standard.
             block[:n1-n0, :k1-k0] = W_i8[n0:n1, k0:k1]
             block_idx = k_idx * n_chunks_per_row + n_idx
@@ -179,13 +179,13 @@ def sd_load_matrix_chunked(ser, addr, W_i8, N, K):
             sd_load(ser, block_addr, block.tobytes())
     return n_chunks_per_row * k_chunks * FQ_MAX_N * FQ_K  # taille totale utilisee
 
-# ─── Blocks transformer (avec KV cache et rope) ───────────────────────────
+# ─── Blocks transformer (with KV cache et rope) ───────────────────────────
 def apply_rope_qk(ser, Q_i8, sQ, K_i8, sK, cos_f, sin_f):
     """Applique rope a chaque head de Q [H,HS] et K [KH,HS].
        cos_f/sin_f shape [HS//2]."""
     Q_out = np.zeros(H*HS, dtype=np.int8)
     K_out = np.zeros(KH*HS, dtype=np.int8)
-    # Tous les heads partagent les memes cos/sin. Mais RR fait UN head et
+    # Tous les heads partagent les memes cos/sin. Mais RR does UN head et
     # renvoie un shift par head. Pour cohérence on dequantize/concat/requantize.
     Q_floats = []
     for h in range(H):
@@ -211,19 +211,19 @@ def attention_block_full(ser, x_i8, sx, weights, pos, kv_cache, freq_cis):
     # rmsnorm
     xn_b, sh_n = call_fn(ser, x_i8, sx, weights['sh_rms'], weights['addr_rms'])
     xn = np.frombuffer(xn_b, dtype=np.int8)
-    # Q, K, V (toutes les dim sont <= 64 ici donc pas de chunking)
+    # Q, K, V (all les dim sont <= 64 ici so pas de chunking)
     Q, shQ = call_fq(ser, H*HS,  sh_n, weights['sh_q'], xn, weights['addr_q'])
     K, shK = call_fq(ser, KH*HS, sh_n, weights['sh_k'], xn, weights['addr_k'])
     V, shV = call_fq(ser, KH*HS, sh_n, weights['sh_v'], xn, weights['addr_v'])
     # rope sur Q et K
     Q, shQ, K, shK = apply_rope_qk(ser, Q, shQ, K, shK, fr_all[pos], fi_all[pos])
-    # Stocker K et V dans le cache (a pos)
+    # Stocker K et V in le cache (a pos)
     kv_cache['K'][pos]  = K.reshape(KH, HS)
     kv_cache['sK'][pos] = shK
     kv_cache['V'][pos]  = V.reshape(KH, HS)
     kv_cache['sV'][pos] = shV
     # Multi-head attention : on doit envoyer K[0..pos] et V[0..pos]
-    # On re-aligne le KV cache en float (chaque position a son propre shift).
+    # On re-aligne le KV cache en float (each position a son propre shift).
     T = pos + 1
     K_floats = np.stack([from_i8_shift(kv_cache['K'][p].astype(np.int32), kv_cache['sK'][p]) for p in range(T)])
     V_floats = np.stack([from_i8_shift(kv_cache['V'][p].astype(np.int32), kv_cache['sV'][p]) for p in range(T)])
@@ -266,7 +266,7 @@ def ffn_block_full(ser, x_i8, sx, weights, hidden):
     # multiply h1s * h3 (PC)
     hg_real = h1s_real * from_i8_shift(h3, shH3)
     hg_i8, sh_g = to_i8_shift(hg_real)
-    # W2 : [64, hidden] -> output D=64 avec input hidden>64 -> chunking K
+    # W2 : [64, hidden] -> output D=64 with input hidden>64 -> chunking K
     if hidden <= FQ_K:
         out_i8, sh_o = call_fq(ser, D, sh_g, weights['sh_w2'], hg_i8, weights['addr_w2'])
     else:
@@ -401,7 +401,7 @@ def transformer_layer(ser, x_i8, sx, attn_w, ffn_w, pos=0):
     return x2_i8, sx2
 
 def transformer_layer_ref(x, attn_w, ffn_w):
-    # Reference simple sans KV cache (pour test_layer.py et test_multi_layer.py)
+    # reference simple without KV cache (pour test_layer.py et test_multi_layer.py)
     xn = rmsnorm_f(x, attn_w['rms_w'])
     Q = (attn_w['W_q'] @ xn).reshape(H, HS)
     K = (attn_w['W_k'] @ xn).reshape(KH, HS)

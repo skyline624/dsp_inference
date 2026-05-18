@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v4 : embed + rmsnorm + Q/K/V + attention + Wo + residual
+# test GG v4 : embed + rmsnorm + Q/K/V + attention + Wo + residual
 # RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms sh_q sh_k sh_v sh_o   (10 bytes)
 # TX : 'G' 'K' shift_x x_after_attn[64]                          (67 bytes)
 
@@ -48,7 +48,7 @@ def main():
     n_pass = 0
     for tok in test_tokens:
         print(f"\n=== tok={tok} ===")
-        # Reference Python : embed -> rmsnorm -> Q/K/V -> attn (T=1, softmax=1) -> Wo -> residual
+        # reference Python : embed -> rmsnorm -> Q/K/V -> attn (T=1, softmax=1) -> Wo -> residual
         x_emb_i8 = tok_emb_i8[tok]
         x_orig = from_i8_shift(x_emb_i8, sh_emb)
         xn_ref, sh_n = rmsnorm_q(x_emb_i8, sh_emb, m['rms_att'][0])

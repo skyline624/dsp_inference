@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test du module rope_op sur FPGA (HS=8, HALF=4).
+# test du module rope_op sur FPGA (HS=8, HALF=4).
 # Protocole : 'R''R' shift_x x[8] cos[4]i16LE sin[4]i16LE  (27 oct)
 # Response  : 'R''K' shift_out dbg_new_real[4 LE] dbg_new_imag[4 LE] out[8]  (19 oct)
 
@@ -47,7 +47,7 @@ def rope_ref(x_i8, sx, cos_arr_f, sin_arr_f):
         s_q = to_q15(sin_arr_f[i])
         nr = xr * c_q - xi * s_q
         ni = xr * s_q + xi * c_q
-        # arrondi (+16384) puis >> 15
+        # arrondi (+16384) then >> 15
         nr_r = (nr + 16384) >> 15
         ni_r = (ni + 16384) >> 15
         out[2*i]     = max(-128, min(127, nr_r))
@@ -80,7 +80,7 @@ def main():
             print(f"  ECHEC : {e}"); continue
         ref_i8 = rope_ref(x_i8, sx, cos_f, sin_f)
 
-        # Verifier le DERNIER pair (i=3) : dbg correspond a new_real_raw et new_imag_raw avant clip
+        # Verifier le last pair (i=3) : dbg correspond a new_real_raw et new_imag_raw before clip
         i = HALF - 1
         c_q = to_q15(cos_f[i]); s_q = to_q15(sin_f[i])
         xr = int(x_i8[2*i]); xi = int(x_i8[2*i + 1])

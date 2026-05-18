@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test du module softmax_op sur FPGA (K=32).
+# test du module softmax_op sur FPGA (K=32).
 # Protocole : 'X''X' shift_x x[32]                                  (35 oct)
 # Response  : 'X''K' shift_out max[1] sum[3] p_sum[1] inv_sum[2] out[32]  (42 oct)
 

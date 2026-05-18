@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test bulk load/dump SDRAM (LL/CC commands).
+# test bulk load/dump SDRAM (LL/CC commands).
 # 'LL' addr[3 LE] N[2 LE] data[N] -> 'LK'
 # 'CC' addr[3 LE] N[2 LE]         -> 'CK' data[N]
 
@@ -36,7 +36,7 @@ def main():
     time.sleep(0.5); ser.reset_input_buffer()
     print("Test SDRAM bulk load/dump\n")
 
-    # Test 0 : minimal 16 bytes
+    # test 0 : minimal 16 bytes
     print("--- Test 0: 16 bytes ---")
     addr = 0x008000
     data = bytes([i+1 for i in range(16)])
@@ -46,7 +46,7 @@ def main():
     print(f"  got ={list(got)}")
     print(f"  match: {'OK' if got==data else 'FAUX'}")
 
-    # Test 1 : 256-byte chunk avec pattern
+    # test 1 : 256-byte chunk with pattern
     print("--- Test 1: 256 bytes pattern ---")
     addr = 0x010000
     data = bytes([(i * 13 + 7) & 0xFF for i in range(256)])
@@ -63,7 +63,7 @@ def main():
         ndiff = sum(1 for a, b in zip(data, got) if a != b)
         print(f"  diffs     : {ndiff}/256")
 
-    # Test 2 : 4 KB chunk
+    # test 2 : 4 KB chunk
     print("\n--- Test 2: 4 KB pattern ---")
     addr = 0x020000
     data = bytes([(i ^ (i >> 3)) & 0xFF for i in range(4096)])
@@ -77,7 +77,7 @@ def main():
     print(f"  dump 4 KB : {(t2-t1)*1000:.1f} ms")
     print(f"  match     : {'OK' if ok else 'FAUX'}")
 
-    # Test 3 : 32 KB (~taille embedding stories260K)
+    # test 3 : 32 KB (~taille embedding stories260K)
     print("\n--- Test 3: 32 KB (~ embedding stories260K) ---")
     addr = 0x100000
     rng = np.random.default_rng(7)

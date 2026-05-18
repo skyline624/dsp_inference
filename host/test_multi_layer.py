@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Test : 5 couches transformer enchainees (= architecture stories260K).
-# Chaque couche a ses propres poids attn et ffn en SDRAM.
+# test : 5 couches transformer enchainees (= architecture stories260K).
+# each couche a ses propres poids attn et ffn en SDRAM.
 
 import time, serial
 import numpy as np
@@ -36,7 +36,7 @@ def main():
         print(f"  couche {L} chargee (attn @ {base_attn:06x}, ffn @ {base_ffn:06x})")
     print()
 
-    # Reference float : enchaine les N couches
+    # reference float : enchaine les N couches
     x_ref = x0_real.copy()
     for L, (aw, fw) in enumerate(layers_real):
         x_ref = transformer_layer_ref(x_ref, aw, fw)

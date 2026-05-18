@@ -1,68 +1,77 @@
 // =============================================================================
-// top.v  --  Test bench pour rmsnorm_op ET silu_op
+// top.v  --  Main FSM for the dsp_inference project.
+// Note : in-line comments below are a mix of English and French (legacy of
+//        the original session). Identifiers and structure are English-only.
 //
-// Commandes UART (1 Mbaud) :
-//   NN : RMSNorm.   PC->FPGA: 'N''N' shift_x shift_w x[64] w[64]    (132 oct)
+// UART commands (1 Mbaud) :
+//   NN : RMSNorm.   PC->FPGA: 'N''N' shift_x shift_w x[64] w[64]    (132 B)
 //                   FPGA->PC: 'N''K' shift_out
 //                            acc[3]+p[1]+shift_amt[1]+raw_inv[2]+apply_shift[1]
-//                            out[64]                                  (75 oct)
+//                            out[64]                                  (75 B)
 //
-//   SS : SiLU.      PC->FPGA: 'S''S' shift_x x[64]                   (67 oct)
+//   SS : SiLU.      PC->FPGA: 'S''S' shift_x x[64]                   (67 B)
 //                   FPGA->PC: 'S''K' shift_out lut_idx[1] silu_int[2 LE] out[64]
-//                                                                    (70 oct)
+//                                                                    (70 B)
 //
-//   RR : RoPE.      PC->FPGA: 'R''R' shift_x x[8] cos[4]i16LE sin[4]i16LE  (27 oct)
+//   RR : RoPE.      PC->FPGA: 'R''R' shift_x x[8] cos[4]i16LE sin[4]i16LE  (27 B)
 //                   FPGA->PC: 'R''K' shift_out new_real[4 LE] new_imag[4 LE] out[8]
-//                                                                    (19 oct)
+//                                                                    (19 B)
 //
-//   XX : Softmax.   PC->FPGA: 'X''X' shift_x x[32]                   (35 oct)
+//   XX : Softmax.   PC->FPGA: 'X''X' shift_x x[32]                   (35 B)
 //                   FPGA->PC: 'X''K' shift_out max[1] sum[3] p_sum[1] inv_sum[2] out[32]
-//                                                                    (42 oct)
+//                                                                    (42 B)
 //
-//   AA : Attention single-head (HS=8, T variable).
+//   AA : Single-head attention (HS=8, variable T).
 //        PC->FPGA: 'A''A' sq sk sv T(1) Q[8] K[T*8] V[T*8]
-//        FPGA->PC: 'A''K' shift_out score_last[2] max[1] sum[2] inv_sum[2] out[8]  (18 oct)
+//        FPGA->PC: 'A''K' shift_out score_last[2] max[1] sum[2] inv_sum[2] out[8]  (18 B)
 //
 //   MM : Multi-head attention (H=8, KH=4, HS=8, GQA n_rep=2).
 //        PC->FPGA: 'M''M' sq sk sv T(1) Q[64] K[T*32] V[T*32]
-//        FPGA->PC: 'M''K' shift_out out[64]  (67 oct)
+//        FPGA->PC: 'M''K' shift_out out[64]  (67 B)
 //
-//   WW : SDRAM write byte.    PC->FPGA: 'W''W' addr[3 LE] data(1)   (6 oct)
-//                              FPGA->PC: 'W''K'                       (2 oct)
+//   WW : SDRAM single-byte write. PC->FPGA: 'W''W' addr[3 LE] data(1)  (6 B)
+//                                  FPGA->PC: 'W''K'                     (2 B)
 //
-//   BB : SDRAM read byte.     PC->FPGA: 'B''B' addr[3 LE]            (5 oct)
-//                              FPGA->PC: 'B''K' data(1)               (3 oct)
+//   BB : SDRAM single-byte read.  PC->FPGA: 'B''B' addr[3 LE]           (5 B)
+//                                  FPGA->PC: 'B''K' data(1)             (3 B)
 //
-//   LL : SDRAM bulk load.     PC->FPGA: 'L''L' addr[3 LE] N[2 LE] data[N]   (7+N oct)
-//                              FPGA->PC: 'L''K'                             (2 oct)
+//   LL : SDRAM bulk load.         PC->FPGA: 'L''L' addr[3 LE] N[2 LE] data[N]   (7+N B)
+//                                  FPGA->PC: 'L''K'                             (2 B)
 //
-//   CC : SDRAM bulk dump.     PC->FPGA: 'C''C' addr[3 LE] N[2 LE]   (7 oct)
-//                              FPGA->PC: 'C''K' data[N]              (2+N oct)
+//   CC : SDRAM bulk dump.         PC->FPGA: 'C''C' addr[3 LE] N[2 LE]           (7 B)
+//                                  FPGA->PC: 'C''K' data[N]                     (2+N B)
 //
-//   FN : RMSNorm avec w en SDRAM. PC->FPGA: 'F''N' sx sw x[64] addr[3]   (71 oct)
-//                                  FPGA->PC: meme reponse que NN  (75 oct)
-//        Le module fetche les 64 octets de w depuis SDRAM[addr] vers wbuf,
-//        puis lance rmsnorm_op. Valide le DMA SDRAM->BSRAM.
+//   FN : RMSNorm with w in SDRAM. PC->FPGA: 'F''N' sx sw x[64] addr[3]   (71 B)
+//                                  FPGA->PC: same response as NN  (75 B)
+//        The module DMAs the 64 bytes of w from SDRAM[addr] into wbuf,
+//        then triggers rmsnorm_op. Validates the SDRAM->BSRAM path.
 //
-//   FM : Matmul y[N] = W[N][64] . x[64], W fetche depuis SDRAM (K=64 hardcode).
-//        PC->FPGA: 'F''M' N(1) sx sw x[64] addr[3]                    (72 oct)
-//        FPGA->PC: 'F''M' y[N*4 LE int32]                             (2+4N oct)
+//   FM : Matmul y[N] = W[N][64] . x[64], W fetched from SDRAM (K=64 hardcoded).
+//        PC->FPGA: 'F''M' N(1) sx sw x[64] addr[3]                    (72 B)
+//        FPGA->PC: 'F''M' y[N*4 LE int32]                             (2+4N B)
 //
-//   FQ : Matmul + reQuantize en int8+shift (N <= 16). Chainable avec d'autres ops.
-//        PC->FPGA: 'F''Q' N(1) sx sw x[64] addr[3]                    (72 oct)
-//        FPGA->PC: 'F''Q' shift_total(1) y_int8[N]                    (3+N oct)
+//   FQ : Matmul + reQuantize to int8+shift (N <= 64). Chainable with other ops.
+//        PC->FPGA: 'F''Q' N(1) sx sw x[64] addr[3]                    (72 B)
+//        FPGA->PC: 'F''Q' shift_total(1) y_int8[N]                    (3+N B)
 //
-//   CN : Chain rmsnorm + matmul + requantize. Tout sur FPGA, 0 round-trip PC.
+//   CN : Chain rmsnorm + matmul + requantize. Fully on FPGA, zero round-trips.
 //        Steps : fetch rms_w -> rmsnorm(x, rms_w) -> copy obuf->xbuf
-//                -> fetch W_row * N -> matmul -> requantize en int8+shift_total.
+//                -> fetch W_row * N -> matmul -> requantize to int8+shift_total.
 //        PC->FPGA: 'C''N' sx sw_rms sw_mm x[64] N(1) addr_rms(3) addr_W(3)
-//                                                                    (76 oct)
-//        FPGA->PC: 'C''N' shift_total(1) y_int8[N]                   (3+N oct)
+//                                                                    (76 B)
+//        FPGA->PC: 'C''N' shift_total(1) y_int8[N]                   (3+N B)
 //
-//   CS : Comme CN + SiLU(matmul_output) en plus, sortie int8 silu(y).
+//   CS : Like CN + SiLU(matmul_output), outputs int8 silu(y).
 //        Steps : CN -> copy obuf->xbuf -> silu_op -> output silu(y)
-//        Protocole RX identique a CN (76 oct).
-//        FPGA->PC: 'C''S' shift_total(1) silu_y_int8[N]              (3+N oct)
+//        Same RX protocol as CN (76 B).
+//        FPGA->PC: 'C''S' shift_total(1) silu_y_int8[N]              (3+N B)
+//
+//   EE : Embedding lookup. PC->FPGA: 'E''E' tok_lo tok_hi          (4 B)
+//        FPGA fetches 64 B from SDRAM[ADDR_TOK_EMB + tok*64] to obuf.
+//        FPGA->PC: 'E''K' x[64]                                       (66 B)
+//
+//   GG : Generation FSM (incremental v0..v5g, see PLAN_GG_AUTONOMIE.md).
+//        Eventually : 'G''G' start_tok N + per-model shifts -> N tokens.
 // =============================================================================
 
 module top (
@@ -85,7 +94,7 @@ module top (
 );
 
     localparam D = 64;
-    localparam BSRAM_SZ = 1024;  // bumpe a 1024 pour MM T_MAX=32 (32*32=1024 bytes K/V)
+    localparam BSRAM_SZ = 1024;  // bumped a 1024 pour MM T_MAX=32 (32*32=1024 bytes K/V)
 
     // ---- PLL : clk_sys 27 MHz + clk_sdram phase-shifte ----
     wire clk_sys, clk_sdram, pll_lock;
@@ -194,7 +203,7 @@ module top (
     reg  fq_mode;                       // 0 = FM (int32), 1 = FQ (requant)
 
     // ---- Adresses hardcodees des poids stories260K (modele specifique) ----
-    // Layout identique a infer_fpga.py quantize_and_load_weights
+    // Layout identical a infer_fpga.py quantize_and_load_weights
     localparam [22:0] ADDR_TOK_EMB     = 23'h000000;
     // Layer 0 : base = 0x010000
     localparam [22:0] ADDR_RMS_ATT_L0  = 23'h010000;
@@ -206,10 +215,10 @@ module top (
     localparam [22:0] ADDR_W1_L0       = 23'h013200;
     localparam [22:0] ADDR_W3_L0       = 23'h016200;
     localparam [22:0] ADDR_W2_L0       = 23'h019200;
-    reg  cn_active;                     // 1 = on est dans une commande CN
+    reg  cn_active;                     // 1 = on est in une commande CN
     reg  cs_active;                     // 1 = CS (CN + silu)
-    reg signed [7:0] cn_sw_mm;          // sauvegarde shift_w pour matmul
-    reg  [22:0] cn_addr_mm;             // sauvegarde addr matmul
+    reg signed [7:0] cn_sw_mm;          // saved shift_w pour matmul
+    reg  [22:0] cn_addr_mm;             // saved addr matmul
 
     // GG (generation FSM) -- flag actif pendant operation GG
     reg          gg_active;
@@ -217,9 +226,9 @@ module top (
     reg signed [7:0] gg_sh_k;           // shift wk
     reg signed [7:0] gg_sh_v;           // shift wv
     reg [3:0]        gg_qkv_phase;      // 0=Q 1=K 2=V 3=Wo 4=post-res 5=W1ch0 6=W1ch1 7=W1ch2
-    reg signed [7:0] gg_sh_q_out;       // shift de Q apres matmul (sauvegarde)
-    reg signed [7:0] gg_sh_k_out;       // shift de K apres matmul
-    reg signed [7:0] gg_sh_v_out;       // shift de V apres matmul
+    reg signed [7:0] gg_sh_q_out;       // shift de Q after matmul (saved)
+    reg signed [7:0] gg_sh_k_out;       // shift de K after matmul
+    reg signed [7:0] gg_sh_v_out;       // shift de V after matmul
     reg [255:0]      gg_k_packed;       // K[32] storage (32 bytes packed)
     reg [255:0]      gg_v_packed;       // V[32] storage
     reg [511:0]      x_save_packed;     // x_orig pour le residual (64 bytes)
@@ -227,14 +236,14 @@ module top (
     reg signed [7:0] gg_sh_o;           // shift de Wo (recu de PC)
     reg signed [7:0] gg_sh_rf;          // shift de rms_ffn (recu de PC)
     reg signed [7:0] gg_sh_h1;          // shift de W1 (recu de PC)
-    // h1[192] storage : BSRAM force pour economiser FF (1-cycle latency lecture)
+    // h1[192] storage : BSRAM force pour economiser FF (1-cycle latency read)
     (* syn_ramstyle = "block_ram" *) reg signed [7:0] h1_packed [0:191];
     reg signed [7:0] h1_rdata_reg;
     reg [7:0]        h1_raddr;
     always @(posedge clk_sys) begin
         h1_rdata_reg <= h1_packed[h1_raddr];
     end
-    reg signed [7:0] gg_sh_h1_ch0;      // shift de h1 chunk 0 apres FQ
+    reg signed [7:0] gg_sh_h1_ch0;      // shift de h1 chunk 0 after FQ
     reg signed [7:0] gg_sh_h1_ch1;      // shift de h1 chunk 1
     reg signed [7:0] gg_sh_h1_ch2;      // shift de h1 chunk 2
     reg signed [7:0] gg_sh_h3;          // shift de W3 (recu de PC)
@@ -245,7 +254,7 @@ module top (
     always @(posedge clk_sys) begin
         h3_rdata_reg <= h3_packed[h3_raddr];
     end
-    // silu_packed : sortie silu sur 3 chunks de 64 (192 bytes)
+    // silu_packed : output silu sur 3 chunks de 64 (192 bytes)
     (* syn_ramstyle = "block_ram" *) reg signed [7:0] silu_packed [0:191];
     reg signed [7:0] silu_rdata_reg;
     reg [7:0]        silu_raddr;
@@ -254,14 +263,14 @@ module top (
     always @(posedge clk_sys) begin
         silu_rdata_reg <= silu_packed[silu_raddr];
     end
-    // tmp_prod : produits silu*h3 stockes en int32 (aligne au shift commun)
+    // tmp_prod : produits silu*h3 stockes en int32 (aligne au shift common)
     (* syn_ramstyle = "block_ram" *) reg signed [31:0] tmp_prod [0:191];
     reg signed [31:0] tmp_prod_rdata_reg;
     reg [7:0]         tmp_prod_raddr;
     always @(posedge clk_sys) begin
         tmp_prod_rdata_reg <= tmp_prod[tmp_prod_raddr];
     end
-    // h_gated : sortie multiply, single shift
+    // h_gated : output multiply, single shift
     (* syn_ramstyle = "block_ram" *) reg signed [7:0] h_gated_packed [0:191];
     reg signed [7:0] h_gated_rdata_reg;
     reg [7:0]        h_gated_raddr;
@@ -273,7 +282,7 @@ module top (
     (* syn_ramstyle = "block_ram" *) reg signed [7:0] partials_packed [0:191];
     reg signed [7:0] partials_rdata_reg;
     reg [7:0]        partials_raddr;
-    reg signed [7:0] gg_sh_h_gated_x;     // shift de l'entree W2 (= gg_sh_h_gated)
+    reg signed [7:0] gg_sh_h_gated_x;     // shift de l'input W2 (= gg_sh_h_gated)
     reg signed [7:0] gg_sh_w2;            // shift Wo (recu de PC)
     reg signed [7:0] gg_sh_p0, gg_sh_p1, gg_sh_p2;
     reg [1:0]        gg_w2_chunk;
@@ -433,7 +442,7 @@ module top (
         .dbg_inv_sum(dbg_attn_inv_sum)
     );
 
-    // MUX BSRAM ports : op_mh partage avec attn ; op_fm prend la main pendant dot product
+    // MUX BSRAM ports : op_mh partage with attn ; op_fm prend la main pendant dot product
     wire use_attn = op_attn | op_mh;
     assign x_raddr_op   = op_fm    ? x_raddr_fm     :
                           use_attn ? attn_k_raddr   :
@@ -442,7 +451,7 @@ module top (
                           op_silu  ? silu_x_raddr   : rms_x_raddr;
     assign w_raddr_op   = op_fm    ? w_raddr_fm     :
                           use_attn ? attn_v_raddr   : rms_w_raddr;
-    // EE (embedding lookup) ecrit directement dans obuf via ces regs
+    // EE (embedding lookup) ecrit directement in obuf via ces regs
     reg [5:0]        ee_obuf_waddr;
     reg signed [7:0] ee_obuf_wdata;
     reg              ee_obuf_we;
@@ -466,7 +475,7 @@ module top (
                           op_rope  ? rope_out_we    :
                           op_silu  ? silu_out_we    : rms_out_we;
 
-    // ---- FSM principale (8 bits depuis le refactor v3-style) ----
+    // ---- FSM principale (8 bits from le refactor v3-style) ----
     localparam [8:0]
         S_IDLE      = 9'd0,
         S_M2_N      = 6'd1,
@@ -574,11 +583,11 @@ module top (
         S_FN_RD     = 7'd99,
         S_FN_RDW    = 7'd100,
         S_FN_WB     = 7'd101,
-        // FM (matmul y=W.x avec W en SDRAM, K=64 fixe)
-        S_FM_N      = 7'd102,    // recoit N
+        // FM (matmul y=W.x with W in SDRAM, K=64 fixe)
+        S_FM_N      = 7'd102,    // receives N
         S_FM_SX     = 7'd103,
         S_FM_SW     = 7'd104,
-        S_FM_RX_X   = 7'd105,    // recoit x[64]
+        S_FM_RX_X   = 7'd105,    // receives x[64]
         S_FM_A0     = 7'd106,
         S_FM_A1     = 7'd107,
         S_FM_A2     = 7'd108,
@@ -590,10 +599,10 @@ module top (
         S_FM_DOT_W1 = 7'd114,
         S_FM_DOT_W2 = 7'd115,
         S_FM_DOT_M  = 7'd116,    // acc += x*w
-        S_FM_STORE  = 7'd117,    // ecrit y[row] (4 oct LE) dans obuf
+        S_FM_STORE  = 7'd117,    // ecrit y[row] (4 oct LE) in obuf
         S_FM_TX_F   = 7'd118,
         S_FM_TX_M   = 7'd119,
-        // FQ phases (apres compute, finds max + requantize)
+        // FQ phases (after compute, finds max + requantize)
         S_FQ_MAX_INIT  = 7'd120,
         S_FQ_MAX_LOOP  = 7'd121,
         S_FQ_SHIFT     = 7'd122,
@@ -603,13 +612,13 @@ module top (
         S_FM_WARMUP_RD = 7'd126,
         S_FM_WARMUP_W  = 7'd127,
         // ---- Pattern v3 : etats communs ----
-        S_OP_RD_BUSY   = 8'd128,    // attend busy=1 apres pulse rd
+        S_OP_RD_BUSY   = 8'd128,    // attend busy=1 after pulse rd
         S_OP_RD_DONE   = 8'd129,    // attend busy=0, dout valide, -> next_state
         S_OP_WR_BUSY   = 8'd130,
         S_OP_WR_DONE   = 8'd131,
         S_REF_BUSY     = 8'd132,
         S_REF_DONE     = 8'd133,    // -> ret_state
-        // CN (chain rmsnorm + matmul) - reutilise FN et FQ via flag cn_active
+        // CN (chain rmsnorm + matmul) - reuse FN et FQ via flag cn_active
         S_M2_CN_2      = 8'd134,
         S_CN_SX        = 8'd135,
         S_CN_SW_RMS    = 8'd136,
@@ -630,7 +639,7 @@ module top (
         S_CN_TX_C      = 8'd151,
         S_CN_TX_N      = 8'd152,
         S_CN_TX_SO     = 8'd153,
-        // CS extension : copy obuf->xbuf puis silu
+        // CS extension : copy obuf->xbuf then silu
         S_CS_COPY_RD   = 8'd154,
         S_CS_COPY_W1   = 8'd155,
         S_CS_COPY_W2   = 8'd156,
@@ -697,7 +706,7 @@ module top (
         S_GG_TX_AG     = 8'd212,   // 'G' magic
         S_GG_TX_AK     = 8'd213,   // 'K' magic
         S_GG_TX_ASH    = 8'd214,   // shift attn
-        S_GG_TX_AD     = 8'd215,   // attn_out[64] depuis Out_packed
+        S_GG_TX_AD     = 8'd215,   // attn_out[64] from Out_packed
         // GG v4 : + Wo + residual
         S_GG_SO        = 8'd216,   // RX sh_o (shift Wo)
         S_GG_LOAD_ATTN = 8'd217,   // copy Out_packed -> xbuf pour Wo input
@@ -708,7 +717,7 @@ module top (
         S_GG_RES_W2    = 8'd222,
         S_GG_RES_STORE = 8'd223,   // compute aligned sum, y_int32[i] <= sum
         S_GG_RES_REQ   = 8'd224,   // jump to FQ requantize flow
-        S_GG_SAVE_X_RD = 8'd225,   // save new x (post-residual) dans x_save_packed
+        S_GG_SAVE_X_RD = 8'd225,   // save new x (post-residual) in x_save_packed
         S_GG_SAVE_X_W1 = 8'd226,
         S_GG_SAVE_X_W2 = 8'd227,
         S_GG_SAVE_X_WB = 8'd228,
@@ -731,7 +740,7 @@ module top (
         S_GG_W1_COPY_W2  = 8'd243,
         S_GG_W1_COPY_WB  = 8'd244,
         S_GG_SETUP_W1    = 8'd245,
-        // GG v5c : sauvegarde chunks W1 + chunks 1+2 W1
+        // GG v5c : saved chunks W1 + chunks 1+2 W1
         S_GG_SAVE_H1_CH0_RD = 8'd246,
         S_GG_SAVE_H1_CH0_W1 = 8'd247,
         S_GG_SAVE_H1_CH0_W2 = 8'd248,
@@ -826,7 +835,7 @@ module top (
         S_GG_SAVE_P_W2    = 9'd329,
         S_GG_SAVE_P_WB    = 9'd330,
         S_GG_W2_NEXT      = 9'd331,
-        // Sum 3-way des partials + residual avec x_save (= x_after_attn)
+        // Sum 3-way des partials + residual with x_save (= x_after_attn)
         S_GG_FFN_RES_INIT = 9'd332,
         S_GG_FFN_RES_RD   = 9'd333,
         S_GG_FFN_RES_W1   = 9'd334,
@@ -960,7 +969,7 @@ module top (
         state == S_CN_N     || state == S_CN_RX_X ||
         state == S_CN_RA0   || state == S_CN_RA1  || state == S_CN_RA2 ||
         state == S_CN_MA0   || state == S_CN_MA1  || state == S_CN_MA2 ||
-        state == S_CS_ZERO_PAD ||    // pas vraiment RX mais on consume rien ici
+        state == S_CS_ZERO_PAD ||    // pas really RX mais we consume rien ici
         state == S_M2_E     || state == S_EE_T0   || state == S_EE_T1 ||
         state == S_M2_G     || state == S_GG_T0   || state == S_GG_T1  ||
         state == S_GG_SE    || state == S_GG_SR   || state == S_GG_SQ  ||
@@ -1143,7 +1152,7 @@ module top (
                     state <= S_AA_RX_Q;
                 end
                 S_AA_RX_Q: if (rx_pending) begin
-                    // packe dans Q_packed[0..7] (mh_h=0 alimentera Q_flat)
+                    // packe in Q_packed[0..7] (mh_h=0 alimentera Q_flat)
                     Q_packed[rx_idx[2:0]*8 +: 8] <= rx_byte;
                     if (rx_idx == 10'd7) begin rx_idx <= 10'd0; state <= S_AA_RX_K; end
                     else rx_idx <= rx_idx + 10'd1;
@@ -1188,7 +1197,7 @@ module top (
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_MM_RX_K: if (rx_pending) begin
-                    // K stocke dans xbuf[0..T*32-1]
+                    // K stocke in xbuf[0..T*32-1]
                     xbuf_waddr <= rx_idx; xbuf_wdata <= $signed(rx_byte); xbuf_we <= 1'b1;
                     if (rx_idx == ({1'd0, attn_T, 5'd0} - 12'd1)) begin   // T*32-1, max 1023
                         rx_idx <= 10'd0; state <= S_MM_RX_V;
@@ -1201,7 +1210,7 @@ module top (
                         state <= S_MM_HEAD;
                     end else rx_idx <= rx_idx + 10'd1;
                 end
-                // Boucle multi-head : pour h=0..H-1, configure kv_offset, run attn, copie sortie
+                // loop multi-head : pour h=0..H-1, configure kv_offset, run attn, copie output
                 S_MM_HEAD: begin
                     // kv_offset = kvh * HS = (h >> 1) * 8 = {h[3:1], 3'd0}
                     attn_kv_offset <= {1'b0, mh_h[3:1], 3'd0};
@@ -1209,7 +1218,7 @@ module top (
                     state          <= S_MM_WAIT;
                 end
                 S_MM_WAIT: if (attn_done) begin
-                    rx_idx <= 10'd0;   // reutilise comme copy index 0..7
+                    rx_idx <= 10'd0;   // reuse comme copy index 0..7
                     state  <= S_MM_COPY1;
                 end
                 // Copie obuf[0..7] -> Out_packed[mh_h*64..mh_h*64+63]
@@ -1252,7 +1261,7 @@ module top (
                 S_WW_DATA: if (rx_pending) begin
                     sd_din <= rx_byte; state <= S_WW_PULSE;
                 end
-                // v3 pattern : check refresh d'abord, sinon pulse wr puis sync busy
+                // v3 pattern : check refresh d'abord, sinon pulse wr then sync busy
                 S_WW_PULSE: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_WW_PULSE; state <= S_REF_BUSY;
@@ -1316,7 +1325,7 @@ module top (
                     sd_din    <= rx_byte;
                     state     <= S_LL_WR_W;
                 end
-                // v3 pattern : check refresh, sinon pulse wr puis sync busy
+                // v3 pattern : check refresh, sinon pulse wr then sync busy
                 S_LL_WR_W: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_LL_WR_W; state <= S_REF_BUSY;
@@ -1351,7 +1360,7 @@ module top (
                         // CS = CN + silu : reuse all CN RX states via cs_active
                         op_sel    <= 4'd8;
                         cn_active <= 1'b1;     // declenche CN flow
-                        cs_active <= 1'b1;     // ET silu en plus apres
+                        cs_active <= 1'b1;     // ET silu en plus after
                         state     <= S_CN_SX;
                     end
                     else state <= S_IDLE;
@@ -1385,7 +1394,7 @@ module top (
                     else                 state <= S_CC_RD;
                 end
 
-                // ---- FN (RMSNorm avec w depuis SDRAM) : sx sw x[64] addr[3] ----
+                // ---- FN (RMSNorm with w from SDRAM) : sx sw x[64] addr[3] ----
                 S_M2_F: if (rx_pending) begin
                     if      (rx_byte == "N") begin op_sel <= 4'd6; fq_mode <= 1'b0; state <= S_FN_SX; end
                     else if (rx_byte == "M") begin op_sel <= 4'd7; fq_mode <= 1'b0; state <= S_FM_N; end
@@ -1422,7 +1431,7 @@ module top (
                 end
                 // S_FN_RDW obsolete
                 S_FN_WB: begin
-                    // ecrit dans wbuf et avance
+                    // ecrit in wbuf et avance
                     wbuf_waddr <= {3'd0, fetch_idx};
                     wbuf_wdata <= sd_dout;
                     wbuf_we    <= 1'b1;
@@ -1436,7 +1445,7 @@ module top (
                     end
                 end
 
-                // ---- FM (matmul y[N]=W.x avec W en SDRAM) ----
+                // ---- FM (matmul y[N]=W.x with W in SDRAM) ----
                 S_FM_N:  if (rx_pending) begin fm_N <= rx_byte[6:0]; state <= S_FM_SX; end
                 S_FM_SX: if (rx_pending) begin rms_shift_x <= $signed(rx_byte); state <= S_FM_SW; end
                 S_FM_SW: if (rx_pending) begin rms_shift_w <= $signed(rx_byte); rx_idx <= 10'd0; state <= S_FM_RX_X; end
@@ -1454,19 +1463,19 @@ module top (
                     bulk_delay<= 4'd0;
                     state     <= S_FM_WARMUP_RD;   // dummy read pour stabiliser SDRAM
                 end
-                // Warm-up (peut etre supprime avec v3 pattern mais on garde par precaution)
+                // Warm-up (peut etre supprime with v3 pattern mais on garde par precaution)
                 S_FM_WARMUP_RD: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_FM_WARMUP_RD; state <= S_REF_BUSY;
                     end else if (!sd_busy) begin
                         sd_rd      <= 1'b1;
-                        next_state <= S_FM_RD;     // direct vers la vraie boucle
+                        next_state <= S_FM_RD;     // direct to la vraie loop
                         state      <= S_OP_RD_BUSY;
                     end
                 end
                 // S_FM_WARMUP_W et S_FM_SETTLE obsoletes
 
-                // Phase 1: fetch 64 octets de la ligne fm_row (v3 pattern)
+                // Phase 1: fetch 64 bytes de la line fm_row (v3 pattern)
                 S_FM_RD: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_FM_RD; state <= S_REF_BUSY;
@@ -1483,7 +1492,7 @@ module top (
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
-                        // Ligne fetchee. Init dot product.
+                        // line fetchee. Init dot product.
                         fetch_idx <= 7'd0;
                         dot_k     <= 7'd0;
                         dot_acc   <= 32'sd0;
@@ -1505,7 +1514,7 @@ module top (
                 S_FM_DOT_M: begin
                     dot_acc <= dot_acc + (fm_xs16 * fm_ws16);
                     if (dot_k == 7'd63) begin
-                        fetch_idx <= 7'd0;     // reutilise comme byte index pour store
+                        fetch_idx <= 7'd0;     // reuse comme byte index pour store
                         state <= S_FM_STORE;
                     end else begin
                         dot_k <= dot_k + 7'd1;
@@ -1516,7 +1525,7 @@ module top (
                 // Phase 3: store y[row]
                 S_FM_STORE: begin
                     if (fq_mode) begin
-                        // FQ : stocke dans y_int32 reg array
+                        // FQ : stocke in y_int32 reg array
                         y_int32[fm_row] <= dot_acc;
                         if (fm_row == fm_N - 7'd1) state <= S_FQ_MAX_INIT;
                         else begin
@@ -1525,7 +1534,7 @@ module top (
                             state <= S_FM_RD;
                         end
                     end else begin
-                        // FM : stocke int32 LE dans obuf
+                        // FM : stocke int32 LE in obuf
                         case (fetch_idx[1:0])
                             2'd0: begin out_waddr_fm <= {fm_row[3:0], 2'd0}; out_wdata_fm <= dot_acc[7:0];   end
                             2'd1: begin out_waddr_fm <= {fm_row[3:0], 2'd1}; out_wdata_fm <= dot_acc[15:8];  end
@@ -1564,9 +1573,9 @@ module top (
                     if (fq_idx == fm_N - 7'd1) state <= S_FQ_SHIFT;
                     else fq_idx <= fq_idx + 7'd1;
                 end
-                // Calcule shift_out = max(0, leading_bit(max_abs) - 6)
+                // computes shift_out = max(0, leading_bit(max_abs) - 6)
                 S_FQ_SHIFT: begin
-                    // fq_lead_bit calcule combinationnel
+                    // fq_lead_bit computes combinationnel
                     fq_shift_out   <= (fq_lead_bit > 6'd6) ? (fq_lead_bit - 6'd6) : 6'd0;
                     fq_shift_total <= rms_shift_x + rms_shift_w
                                       + $signed({2'd0, ((fq_lead_bit > 6'd6) ? (fq_lead_bit - 6'd6) : 6'd0)});
@@ -1574,7 +1583,7 @@ module top (
                     state  <= S_FQ_REQ_INIT;
                 end
                 S_FQ_REQ_INIT: state <= S_FQ_REQ_LOOP;
-                // Pass 2 : ecrit y_int8 dans obuf[fq_idx]
+                // Pass 2 : ecrit y_int8 in obuf[fq_idx]
                 S_FQ_REQ_LOOP: begin
                     begin: req_blk
                         reg signed [31:0] yv;
@@ -1619,7 +1628,7 @@ module top (
                     else fq_idx <= fq_idx + 7'd1;
                 end
 
-                // ---- CS : copie obuf->xbuf puis silu ----
+                // ---- CS : copie obuf->xbuf then silu ----
                 S_CS_COPY_RD: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_CS_COPY_W1;
@@ -1674,13 +1683,13 @@ module top (
                     end else state <= S_IDLE;
                 end
                 S_EE_T0: if (rx_pending) begin
-                    // Capture token bits [7:0] dans sd_addr[13:6] (= tok_lo * 64)
+                    // Capture token bits [7:0] in sd_addr[13:6] (= tok_lo * 64)
                     sd_addr[13:6] <= rx_byte;
                     sd_addr[5:0]  <= 6'd0;
                     state         <= S_EE_T1;
                 end
                 S_EE_T1: if (rx_pending) begin
-                    // Capture token bits [15:8] dans sd_addr[21:14] (= tok_hi * 64 * 256)
+                    // Capture token bits [15:8] in sd_addr[21:14] (= tok_hi * 64 * 256)
                     sd_addr[21:14] <= rx_byte;
                     sd_addr[22]    <= 1'b0;
                     state          <= S_EE_RD;
@@ -1696,7 +1705,7 @@ module top (
                     end
                 end
                 S_EE_WB: begin
-                    // ecrit dans obuf et avance (via ee_obuf_we mux)
+                    // ecrit in obuf et avance (via ee_obuf_we mux)
                     ee_obuf_waddr <= fetch_idx[5:0];
                     ee_obuf_wdata <= sd_dout;
                     ee_obuf_we    <= 1'b1;
@@ -1729,7 +1738,7 @@ module top (
                     end else state <= S_IDLE;
                 end
                 S_GG_T0: if (rx_pending) begin
-                    sd_addr[13:6] <= rx_byte;   // tok_lo * 64 (offset bas)
+                    sd_addr[13:6] <= rx_byte;   // tok_lo * 64 (offset low)
                     sd_addr[5:0]  <= 6'd0;
                     state         <= S_GG_T1;
                 end
@@ -1781,7 +1790,7 @@ module top (
                     fetch_idx  <= 7'd0;
                     state      <= S_GG_EMB_RD;
                 end
-                // Phase 1 : DMA fetch embed (64 bytes) depuis SDRAM[tok*64] vers xbuf
+                // Phase 1 : DMA fetch embed (64 bytes) from SDRAM[tok*64] to xbuf
                 S_GG_EMB_RD: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_GG_EMB_RD; state <= S_REF_BUSY;
@@ -1795,11 +1804,11 @@ module top (
                     xbuf_waddr <= {3'd0, fetch_idx};
                     xbuf_wdata <= sd_dout;
                     xbuf_we    <= 1'b1;
-                    // En parallele : save embed dans x_save_packed pour residual
+                    // in parallel : save embed in x_save_packed pour residual
                     x_save_packed[fetch_idx[5:0]*8 +: 8] <= sd_dout;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
-                        // Embed charge dans xbuf. Maintenant fetch rms_w[L0] dans wbuf.
+                        // Embed load in xbuf. Maintenant fetch rms_w[L0] in wbuf.
                         sd_addr   <= ADDR_RMS_ATT_L0;
                         fetch_idx <= 7'd0;
                         state     <= S_GG_FN_RD;
@@ -1808,7 +1817,7 @@ module top (
                         state     <= S_GG_EMB_RD;
                     end
                 end
-                // Phase 2 : DMA fetch rms_w (64 bytes) depuis ADDR_RMS_ATT_L0 vers wbuf
+                // Phase 2 : DMA fetch rms_w (64 bytes) from ADDR_RMS_ATT_L0 to wbuf
                 S_GG_FN_RD: begin
                     if (refresh_due && !sd_busy) begin
                         sd_refresh <= 1'b1; ret_state <= S_GG_FN_RD; state <= S_REF_BUSY;
@@ -1831,9 +1840,9 @@ module top (
                         state     <= S_GG_FN_RD;
                     end
                 end
-                // Phase 3 : run rmsnorm (resultat dans obuf via rms_out_we mux)
+                // Phase 3 : run rmsnorm (resultat in obuf via rms_out_we mux)
                 S_GG_RUN_RMS: if (rms_done) begin
-                    rx_idx <= 10'd0;        // reutilise comme copy index
+                    rx_idx <= 10'd0;        // reuse comme copy index
                     state  <= S_GG_COPY_RD;
                 end
                 // Phase 4 : copie obuf -> xbuf (pour input du matmul Q)
@@ -1947,7 +1956,7 @@ module top (
                         state  <= S_GG_SAVE_V_RD;
                     end
                 end
-                // ---- v3 : load K et V depuis packed regs vers xbuf et wbuf ----
+                // ---- v3 : load K et V from packed regs to xbuf et wbuf ----
                 S_GG_LOAD_KV: begin
                     // T=1 : K[0..31] -> xbuf[0..31], V[0..31] -> wbuf[0..31]
                     xbuf_waddr <= rx_idx;
@@ -1960,15 +1969,15 @@ module top (
                     else rx_idx <= rx_idx + 10'd1;
                 end
                 S_GG_SETUP_MM: begin
-                    // Q deja dans Q_packed (= Q_flat dans MM)
+                    // Q already in Q_packed (= Q_flat in MM)
                     attn_shift_q   <= gg_sh_q_out;
                     attn_shift_k   <= gg_sh_k_out;
                     attn_shift_v   <= gg_sh_v_out;
                     attn_T         <= 6'd1;
                     attn_kv_stride <= 6'd32;       // multi-head : [t][kvh][hs]
                     mh_h           <= 4'd0;
-                    op_sel         <= 4'd5;        // op_mh pour boucle MM
-                    state          <= S_MM_HEAD;   // reutilise flow MM existant
+                    op_sel         <= 4'd5;        // op_mh pour loop MM
+                    state          <= S_MM_HEAD;   // reuse flow MM existant
                 end
                 // ---- TX response v3 : 'G' 'K' shift_attn attn_out[64] ----
                 S_GG_TX_AG: if (!tx_busy && !tx_send) begin
@@ -1978,7 +1987,7 @@ module top (
                     tx_data <= "K"; tx_send <= 1'b1; state <= S_GG_TX_ASH;
                 end
                 S_GG_TX_ASH: if (!tx_busy && !tx_send) begin
-                    tx_data <= attn_shift_out;     // = sh_v apres fix v4.5t
+                    tx_data <= attn_shift_out;     // = sh_v after fix v4.5t
                     tx_send <= 1'b1;
                     tx_idx  <= 10'd0;
                     state   <= S_GG_TX_AD;
@@ -1992,7 +2001,7 @@ module top (
                     end else tx_idx <= tx_idx + 10'd1;
                 end
 
-                // ---- v4 : load attn_out depuis Out_packed vers xbuf ----
+                // ---- v4 : load attn_out from Out_packed to xbuf ----
                 S_GG_LOAD_ATTN: begin
                     xbuf_waddr <= rx_idx;
                     xbuf_wdata <= Out_packed[rx_idx[5:0]*8 +: 8];
@@ -2003,7 +2012,7 @@ module top (
                 // ---- v4 : setup matmul Wo ----
                 S_GG_SETUP_WO: begin
                     sd_addr      <= ADDR_WO_L0;
-                    rms_shift_x  <= attn_shift_out;     // input = sortie MM
+                    rms_shift_x  <= attn_shift_out;     // input = output MM
                     rms_shift_w  <= gg_sh_o;
                     op_sel       <= 4'd7;               // op_fm pour FQ
                     fq_mode      <= 1'b1;
@@ -2013,7 +2022,7 @@ module top (
                     gg_qkv_phase <= 4'd3;               // phase 3 = post-Wo
                     state        <= S_FM_WARMUP_RD;
                 end
-                // ---- v4 : residual init (apres Wo, obuf contient Wo_out) ----
+                // ---- v4 : residual init (after Wo, obuf contient Wo_out) ----
                 S_GG_RES_INIT: begin
                     max_abs <= 32'd0;
                     fq_idx  <= 7'd0;
@@ -2053,7 +2062,7 @@ module top (
                     end
                     if (fq_idx == 7'd63) begin
                         // Setup pour FQ_SHIFT : rms_shift_x = sh_min, rms_shift_w = 0
-                        // fq_shift_total = sh_min + add_shift apres requantize
+                        // fq_shift_total = sh_min + add_shift after requantize
                         op_sel       <= 4'd7;       // FQ pour ecrire obuf via out_we_fm
                         fq_mode      <= 1'b1;
                         fm_N         <= 7'd64;
@@ -2067,8 +2076,8 @@ module top (
                         state  <= S_GG_RES_RD;
                     end
                 end
-                // Apres FQ requantize (obuf contient x_after_residual int8)
-                // -> save x dans x_save_packed pour le prochain layer
+                // after FQ requantize (obuf contient x_after_residual int8)
+                // -> save x in x_save_packed pour le prochain layer
                 S_GG_SAVE_X_RD: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_GG_SAVE_X_W1;
@@ -2078,11 +2087,11 @@ module top (
                 S_GG_SAVE_X_WB: begin
                     x_save_packed[rx_idx[5:0]*8 +: 8] <= obuf_rdata_reg;
                     if (rx_idx == 10'd63) begin
-                        // Update gg_x_shift = fq_shift_total (le shift final apres residual+requant)
+                        // Update gg_x_shift = fq_shift_total (le shift final after residual+requant)
                         gg_x_shift <= fq_shift_total;
                         op_sel     <= 4'd10;
                         rx_idx     <= 10'd0;
-                        state      <= S_GG_FFN_COPY_RD;    // chain vers FFN rmsnorm
+                        state      <= S_GG_FFN_COPY_RD;    // chain to FFN rmsnorm
                     end else begin
                         rx_idx <= rx_idx + 10'd1;
                         state  <= S_GG_SAVE_X_RD;
@@ -2116,7 +2125,7 @@ module top (
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
-                        // Setup rmsnorm pour FFN : shift_x = gg_x_shift (= sh apres residual), shift_w = sh_rms_ffn
+                        // Setup rmsnorm pour FFN : shift_x = gg_x_shift (= sh after residual), shift_w = sh_rms_ffn
                         rms_shift_x <= gg_x_shift;
                         rms_shift_w <= gg_sh_rf;
                         rms_start   <= 1'b1;
@@ -2128,9 +2137,9 @@ module top (
                 end
                 S_GG_FFN_RUN_RMS: if (rms_done) begin
                     rx_idx <= 10'd0;
-                    state  <= S_GG_W1_COPY_RD;     // chain vers W1 matmul
+                    state  <= S_GG_W1_COPY_RD;     // chain to W1 matmul
                 end
-                // ---- v5b : copy x_norm_ffn (obuf) -> xbuf, puis setup W1 ----
+                // ---- v5b : copy x_norm_ffn (obuf) -> xbuf, then setup W1 ----
                 S_GG_W1_COPY_RD: begin
                     obuf_raddr <= rx_idx;
                     state      <= S_GG_W1_COPY_W1;
@@ -2234,7 +2243,7 @@ module top (
                     if (rx_idx == 10'd63) begin
                         gg_sh_h1_ch2 <= fq_shift_total;
                         rx_idx       <= 10'd0;
-                        state        <= S_GG_SETUP_W3_CH0;     // chain vers W3
+                        state        <= S_GG_SETUP_W3_CH0;     // chain to W3
                     end else begin
                         rx_idx <= rx_idx + 10'd1;
                         state  <= S_GG_SAVE_H1_CH2_RD;
@@ -2315,7 +2324,7 @@ module top (
                         rx_idx        <= 10'd0;
                         gg_silu_chunk <= 2'd0;
                         op_sel        <= 4'd10;
-                        state         <= S_GG_SILU_LOAD_RD;    // chain vers silu
+                        state         <= S_GG_SILU_LOAD_RD;    // chain to silu
                     end else begin
                         rx_idx <= rx_idx + 10'd1;
                         state  <= S_GG_SAVE_H3_CH2_RD;
@@ -2442,7 +2451,7 @@ module top (
                         silu_v = {{8{silu_rdata_reg[7]}}, silu_rdata_reg};
                         h3_v   = {{8{h3_rdata_reg[7]}},   h3_rdata_reg};
                         prod_i32 = silu_v * h3_v;        // i16 * i16 = i32 (mais holds in 16 typically)
-                        // Aligner au shift commun via shift_extra du chunk
+                        // Aligner au shift common via shift_extra du chunk
                         case (gg_mult_i[7:6])
                             2'd0: sh_extra = sh_extra_0;
                             2'd1: sh_extra = sh_extra_1;
@@ -2585,7 +2594,7 @@ module top (
                 end
                 // Sum 3-way des partials + x_save (= x_after_attn) en int32 align
                 // shifts impliques : gg_sh_p0, gg_sh_p1, gg_sh_p2, gg_x_shift (x_save)
-                // Align tout au shift min, somme, requantize, store dans obuf
+                // Align tout au shift min, somme, requantize, store in obuf
                 S_GG_FFN_RES_INIT: begin
                     max_abs <= 32'd0;
                     fq_idx  <= 7'd0;
@@ -2733,8 +2742,8 @@ module top (
                     tx_idx  <= 10'd0;
                     state   <= S_GG_TX_XD;
                 end
-                // Pattern identique a S_TX_O_RD : set obuf_raddr immediatement, puis
-                // attente UART dans le W state donne le temps au BSRAM (2 cycles).
+                // Pattern identical a S_TX_O_RD : set obuf_raddr immediatement, then
+                // attente UART in le W state donne le temps au BSRAM (2 cycles).
                 S_GG_TX_XD: begin
                     obuf_raddr <= tx_idx;
                     state      <= S_GG_TX_XD_W;
@@ -2789,7 +2798,7 @@ module top (
                     end else tx_idx <= tx_idx + 10'd1;
                 end
 
-                // ---- TX commune ----
+                // ---- TX common ----
                 S_TX_M1: if (!tx_busy && !tx_send) begin
                     tx_data <= (op_fn || op_fm) ? "F" :
                                op_mh   ? "M" :
@@ -2804,7 +2813,7 @@ module top (
                                 op_fm             ? "M" : "K";
                     tx_send <= 1'b1;
                     if (op_fm) tx_idx <= 10'd0;
-                    // FQ : envoie shift_total puis obuf
+                    // FQ : sends shift_total then obuf
                     state   <= (op_fm && fq_mode) ? S_TX_SO :       // SO sera shift_total
                                op_fm              ? S_TX_O_RD :
                                op_mh              ? S_TX_SO   : S_TX_SO;
@@ -2812,7 +2821,7 @@ module top (
                 S_TX_SO: if (!tx_busy && !tx_send) begin
                     tx_data <= cur_shift_out; tx_send <= 1'b1;
                     tx_idx  <= 10'd0;
-                    state   <= (op_fm && fq_mode) ? S_TX_O_RD :    // FQ : N int8 dans obuf
+                    state   <= (op_fm && fq_mode) ? S_TX_O_RD :    // FQ : N int8 in obuf
                                op_mh              ? S_TX_MH_W : S_TX_DBG;
                 end
                 S_TX_DBG: if (!tx_busy && !tx_send) begin
@@ -2836,7 +2845,7 @@ module top (
                         state  <= S_TX_O_RD;
                     end
                 end
-                // Multi-head TX : envoie Out_packed (64 bytes) - source directe pas BSRAM
+                // Multi-head TX : sends Out_packed (64 bytes) - source directe pas BSRAM
                 S_TX_MH_W: if (!tx_busy && !tx_send) begin
                     tx_data <= Out_packed[tx_idx[5:0]*8 +: 8];
                     tx_send <= 1'b1;
@@ -2862,7 +2871,7 @@ module top (
                 S_CN_MA1: if (rx_pending) begin cn_addr_mm[15:8]  <= rx_byte;     state <= S_CN_MA2; end
                 S_CN_MA2: if (rx_pending) begin
                     cn_addr_mm[22:16] <= rx_byte[6:0];
-                    // Demarre Phase 1 : fetch rmsnorm w (utilise FN flow)
+                    // Demarre Phase 1 : fetch rmsnorm w (use FN flow)
                     fetch_idx <= 7'd0;
                     state     <= S_FN_RD;
                 end
@@ -2890,7 +2899,7 @@ module top (
                     end
                 end
 
-                // ---- CN Phase 3 : setup matmul puis go en FQ flow ----
+                // ---- CN Phase 3 : setup matmul then go en FQ flow ----
                 S_CN_SETUP_MM: begin
                     sd_addr     <= cn_addr_mm;
                     rms_shift_x <= rms_shift_out;

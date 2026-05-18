@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Test GG v5c : v5b + W1 chunks 1 et 2 -> h1[192] complet (172 utiles + padding)
+# test GG v5c : v5b + W1 chunks 1 et 2 -> h1[192] complete (172 utiles + padding)
 # TX : 'G' 'K' sh_ch0 sh_ch1 sh_ch2 h1[192]   (197 bytes)
 
 import time, serial
@@ -79,7 +79,7 @@ def main():
         h1_fpga, sh_ch0, sh_ch1, sh_ch2 = call_gg_v5c(ser, tok, [sh_emb, sh_rms, sh_q, sh_k, sh_v, sh_o, sh_rms_ffn, sh_h1])
         print(f"  sh FPGA  ch0={sh_ch0}  ch1={sh_ch1}  ch2={sh_ch2}")
         print(f"  sh ref   ch0={sh_ch0_ref}  ch1={sh_ch1_ref}  ch2={sh_ch2_ref}")
-        # Compare chaque chunk
+        # compare each chunk
         h1_ch0_fpga = h1_fpga[0:64]
         h1_ch1_fpga = h1_fpga[64:128]
         h1_ch2_fpga = h1_fpga[128:172]   # 172 utiles (padding ignore)

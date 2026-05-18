@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Genere la LUT exp(x) pour x in [-8, 0] (= apres soustraction de max).
+# Genere la LUT exp(x) pour x in [-8, 0] (= after soustraction de max).
 # 256 entrees Q15 : LUT[i] = round(exp(-8 + i/32) * 32768), i in 0..255.
 # LUT[0]=exp(-8)~=0, LUT[255]=exp(-0.03125)~=0.969.
 
