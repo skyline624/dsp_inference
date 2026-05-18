@@ -59,9 +59,20 @@ cd host
 python infer_fpga.py
 ```
 
-## Known RTL bugs
+## Known RTL bugs and limitations
 
 1. `MM`: 3 bugs fixed in v4.5t (hardcoded shift, T_MAX=8→32, T width 4→6 bits)
-2. `GG v5g`: output 25× too small (W2 chunked + 3-way sum + residual — needs debugging)
+2. `GG v5g v1`: output 25× too small (W2 chunked + 3-way sum + residual)
+3. `GG v5g v2`: simpler refactor with `gg_accumulate`/`gg_skip_requant` flags
+   **does not route** on Tang Nano GW2AR-18 (Gowin routing phase hangs).
+   The cumulative GG FSM logic (v0..v5g v2) plus BSRAM/tmp_prod storage
+   exceeds the device's routing budget. Need to either:
+   - Optimize current RTL (factor out duplicated patterns, share more state)
+   - Split GG across multiple smaller commands (back to PC-orchestrated)
+   - Move to a bigger FPGA
+
+**Current effective bitstream**: GG v5f (working through silu+multiply,
+TX h_gated). For full layer, use `host/infer_fpga.py` (PC orchestrates
+per-layer GG calls, ~3 s/token).
 
 See commit history for the full timeline.

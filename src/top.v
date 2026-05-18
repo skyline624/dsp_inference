@@ -286,7 +286,11 @@ module top (
     reg signed [7:0] gg_sh_w2;            // shift Wo (recu de PC)
     reg signed [7:0] gg_sh_p0, gg_sh_p1, gg_sh_p2;
     reg [1:0]        gg_w2_chunk;
-    reg signed [7:0] gg_p0_temp, gg_p1_temp;    // temp pour sum 3-way (p2 = direct read)
+    reg signed [7:0] gg_p0_temp, gg_p1_temp;
+    // v5g v2 : accumulate flag (FQ dot_acc starts from y_int32[fm_row] instead of 0)
+    // skip_requant flag (FQ ends without MAX/REQ loops, goes to next chunk setup)
+    reg              gg_accumulate;
+    reg              gg_skip_requant;
     always @(posedge clk_sys) begin
         partials_rdata_reg <= partials_packed[partials_raddr];
     end
@@ -1009,6 +1013,8 @@ module top (
             cs_active  <= 1'b0;
             gg_active  <= 1'b0;
             ee_obuf_we <= 1'b0;
+            gg_accumulate   <= 1'b0;
+            gg_skip_requant <= 1'b0;
         end else begin
             tx_send    <= 1'b0;
             xbuf_we    <= 1'b0;
@@ -1492,10 +1498,11 @@ module top (
                     wbuf_we    <= 1'b1;
                     sd_addr    <= sd_addr + 23'd1;
                     if (fetch_idx == 7'd63) begin
-                        // line fetchee. Init dot product.
+                        // line fetched. Init dot product.
+                        // gg_accumulate=1 : start from y_int32[fm_row] (for W2 chunked sum)
                         fetch_idx <= 7'd0;
                         dot_k     <= 7'd0;
-                        dot_acc   <= 32'sd0;
+                        dot_acc   <= gg_accumulate ? y_int32[fm_row] : 32'sd0;
                         state     <= S_FM_DOT_A;
                     end else begin
                         fetch_idx <= fetch_idx + 7'd1;
@@ -1527,7 +1534,16 @@ module top (
                     if (fq_mode) begin
                         // FQ : stocke in y_int32 reg array
                         y_int32[fm_row] <= dot_acc;
-                        if (fm_row == fm_N - 7'd1) state <= S_FQ_MAX_INIT;
+                        if (fm_row == fm_N - 7'd1) begin
+                            // gg_skip_requant : end FQ here, dispatch to next chunk via phase
+                            if (gg_skip_requant) begin
+                                op_sel <= 4'd10;
+                                case (gg_qkv_phase)
+                                    4'd11: state <= S_GG_W2_NEXT;  // post-W2 chunk N (accumulator filled, go next chunk)
+                                    default: state <= S_FQ_MAX_INIT;
+                                endcase
+                            end else state <= S_FQ_MAX_INIT;
+                        end
                         else begin
                             fm_row <= fm_row + 7'd1;
                             fetch_idx <= 7'd0;
@@ -1618,7 +1634,7 @@ module top (
                                 4'd8: state <= S_GG_SAVE_H3_CH0_RD;
                                 4'd9: state <= S_GG_SAVE_H3_CH1_RD;
                                 4'd10: state <= S_GG_SAVE_H3_CH2_RD;
-                                4'd11: state <= S_GG_SAVE_P_RD;          // post-W2 chunk
+                                4'd11: state <= S_GG_RES_INIT;            // post-W2 last chunk : lance residual v4 (2-way avec x_save)
                                 default: state <= S_GG_SAVE_Q_RD;
                             endcase
                             rx_idx <= 10'd0;
@@ -1731,10 +1747,12 @@ module top (
                 // TX : 'G' 'K' shift_out x_norm[64]              (67 bytes)
                 S_M2_G: if (rx_pending) begin
                     if (rx_byte == "G") begin
-                        op_sel       <= 4'd10;
-                        gg_active    <= 1'b1;
-                        gg_qkv_phase <= 4'd0;
-                        state        <= S_GG_T0;
+                        op_sel          <= 4'd10;
+                        gg_active       <= 1'b1;
+                        gg_qkv_phase    <= 4'd0;
+                        gg_accumulate   <= 1'b0;     // default off for all non-W2 matmuls
+                        gg_skip_requant <= 1'b0;
+                        state           <= S_GG_T0;
                     end else state <= S_IDLE;
                 end
                 S_GG_T0: if (rx_pending) begin
@@ -2549,17 +2567,21 @@ module top (
                     end
                 end
                 // Setup matmul W2 chunk : addr = ADDR_W2_L0 + chunk*4096
+                // gg_accumulate = (chunk > 0)  : chunks 1,2 accumulate dans y_int32
+                // gg_skip_requant = (chunk < 2) : chunks 0,1 skip MAX/REQ_LOOP (intermediate)
                 S_GG_SETUP_W2: begin
-                    sd_addr      <= ADDR_W2_L0 + ({21'd0, gg_w2_chunk} <<< 12);  // *4096
-                    rms_shift_x  <= gg_sh_h_gated;
-                    rms_shift_w  <= gg_sh_w2;
-                    op_sel       <= 4'd7;
-                    fq_mode      <= 1'b1;
-                    fm_N         <= 7'd64;
-                    fm_row       <= 7'd0;
-                    fetch_idx    <= 7'd0;
-                    gg_qkv_phase <= 4'd11;
-                    state        <= S_FM_WARMUP_RD;
+                    sd_addr         <= ADDR_W2_L0 + ({21'd0, gg_w2_chunk} <<< 12);
+                    rms_shift_x     <= gg_sh_h_gated;
+                    rms_shift_w     <= gg_sh_w2;
+                    op_sel          <= 4'd7;
+                    fq_mode         <= 1'b1;
+                    fm_N            <= 7'd64;
+                    fm_row          <= 7'd0;
+                    fetch_idx       <= 7'd0;
+                    gg_accumulate   <= (gg_w2_chunk != 2'd0);   // first chunk : start at 0
+                    gg_skip_requant <= (gg_w2_chunk != 2'd2);   // last chunk : do requant
+                    gg_qkv_phase    <= 4'd11;
+                    state           <= S_FM_WARMUP_RD;
                 end
                 // Save obuf[0..63] -> partials_packed[chunk*64..chunk*64+63]
                 S_GG_SAVE_P_RD: begin
@@ -2583,14 +2605,12 @@ module top (
                     end
                 end
                 S_GG_W2_NEXT: begin
-                    if (gg_w2_chunk == 2'd2) begin
-                        // Tous chunks done. Lance sum 3-way + residual
-                        state <= S_GG_FFN_RES_INIT;
-                    end else begin
-                        gg_w2_chunk <= gg_w2_chunk + 2'd1;
-                        rx_idx      <= 10'd0;
-                        state       <= S_GG_W2_LOAD_RD;
-                    end
+                    // With accumulate flag, no partials BSRAM needed.
+                    // Chunks 0,1 arrive here via gg_skip_requant in S_FM_STORE.
+                    // Chunk 2 goes through MAX/REQ_LOOP, then RES_INIT directly.
+                    gg_w2_chunk <= gg_w2_chunk + 2'd1;
+                    rx_idx      <= 10'd0;
+                    state       <= S_GG_W2_LOAD_RD;
                 end
                 // Sum 3-way des partials + x_save (= x_after_attn) en int32 align
                 // shifts impliques : gg_sh_p0, gg_sh_p1, gg_sh_p2, gg_x_shift (x_save)
