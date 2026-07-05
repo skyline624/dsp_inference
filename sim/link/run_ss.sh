@@ -37,5 +37,10 @@ case "${1:-ffn}" in
     make -f Makefile.nodess clean >/dev/null 2>&1 || true
     make -f Makefile.nodess
     ;;
-  *) echo "usage: $0 {ffn <NN>|attn <NN>|node}"; exit 1;;
+  rr)
+    # sub-gate 2 : node rope_op (RR) isolated vs Q15 fixed-point reference
+    make -f Makefile.nodess clean >/dev/null 2>&1 || true
+    make -f Makefile.nodess MODULE=test_rr_node
+    ;;
+  *) echo "usage: $0 {ffn <NN>|attn <NN>|layer <NN>|model <NN>|node|rr}"; exit 1;;
 esac
