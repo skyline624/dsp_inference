@@ -21,6 +21,18 @@ case "${1:-ffn}" in
     make -f Makefile.attnss clean >/dev/null 2>&1 || true
     NN="$NN" make -f Makefile.attnss NN="$NN"
     ;;
+  layer)
+    cp -f ../test_layer_tp.py .
+    NN="${2:-2}"
+    make -f Makefile.layerss clean >/dev/null 2>&1 || true
+    NN="$NN" make -f Makefile.layerss NN="$NN"
+    ;;
+  model)
+    cp -f ../test_model_tp.py .
+    NN="${2:-2}"
+    make -f Makefile.modelss clean >/dev/null 2>&1 || true
+    NN="$NN" make -f Makefile.modelss NN="$NN"
+    ;;
   node)
     make -f Makefile.nodess clean >/dev/null 2>&1 || true
     make -f Makefile.nodess
