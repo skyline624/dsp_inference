@@ -1,0 +1,33 @@
+# Phase-3 unified gate : NN nodes + attention sequencer over the parallel link (LINK_SS).
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+RTL := $(abspath ../../src)
+NN  ?= 2
+
+VERILOG_SOURCES += $(abspath ../models/Gowin_rPLL.v)
+VERILOG_SOURCES += $(abspath ../models/MULTALU18X18.v)
+VERILOG_SOURCES += $(abspath ../models/sdram_chip.v)
+VERILOG_SOURCES += $(RTL)/mac18.v
+VERILOG_SOURCES += $(RTL)/rmsnorm_op.v
+VERILOG_SOURCES += $(RTL)/silu_op.v
+VERILOG_SOURCES += $(RTL)/rope_op.v
+VERILOG_SOURCES += $(RTL)/softmax_op.v
+VERILOG_SOURCES += $(RTL)/attention_head_op.v
+VERILOG_SOURCES += $(RTL)/sdram.v
+VERILOG_SOURCES += $(abspath async_fifo.v)
+VERILOG_SOURCES += $(abspath uart_bridge.v)
+VERILOG_SOURCES += $(abspath vec_alu2.v)
+VERILOG_SOURCES += $(RTL)/top.v
+VERILOG_SOURCES += $(abspath ../attn_tp_seq.v)
+VERILOG_SOURCES += $(abspath attn_seq_ss_top.v)
+
+COMPILE_ARGS += -DLINK_SS
+COMPILE_ARGS += -I$(RTL)
+COMPILE_ARGS += -Pattn_seq_ss_top.NN=$(NN)
+
+TOPLEVEL := attn_seq_ss_top
+MODULE   ?= test_attn_tp
+
+# NOTE: copy the LUT *.hex into this cwd before running (rmsnorm/silu $readmemh
+# by relative path). Use ./run_ss.sh or: cp -f ../../src/*.hex .
+include $(shell cocotb-config --makefiles)/Makefile.sim
