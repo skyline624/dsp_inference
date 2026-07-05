@@ -1,0 +1,28 @@
+# Phase-1 node-side gate : top.v built with LINK_SS (parallel link instead of UART).
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+RTL := $(abspath ../../src)
+
+VERILOG_SOURCES += $(abspath ../models/Gowin_rPLL.v)
+VERILOG_SOURCES += $(abspath ../models/MULTALU18X18.v)
+VERILOG_SOURCES += $(abspath ../models/sdram_chip.v)
+VERILOG_SOURCES += $(RTL)/mac18.v
+VERILOG_SOURCES += $(RTL)/rmsnorm_op.v
+VERILOG_SOURCES += $(RTL)/silu_op.v
+VERILOG_SOURCES += $(RTL)/rope_op.v
+VERILOG_SOURCES += $(RTL)/softmax_op.v
+VERILOG_SOURCES += $(RTL)/attention_head_op.v
+VERILOG_SOURCES += $(RTL)/sdram.v
+VERILOG_SOURCES += $(abspath async_fifo.v)
+VERILOG_SOURCES += $(abspath uart_bridge.v)
+VERILOG_SOURCES += $(RTL)/top.v
+VERILOG_SOURCES += $(abspath node_ss_top.v)
+
+# LINK_SS swaps top.v's serial UART PHY for the fifo adapters.
+COMPILE_ARGS += -DLINK_SS
+COMPILE_ARGS += -I$(RTL)
+
+TOPLEVEL := node_ss_top
+MODULE   ?= test_node_ss
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

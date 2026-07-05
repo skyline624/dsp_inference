@@ -74,10 +74,24 @@
 //        Eventually : 'G''G' start_tok N + per-model shifts -> N tokens.
 // =============================================================================
 
-module top (
+module top #(
+    parameter        SD_HALF = 135,      // SD SPI clock divider (~100 kHz @27MHz, reliable reads)
+    parameter [15:0] SD_NBLK = 16'd769   // blocks to load from SD at boot (stories260K = 769)
+) (
     input  wire        clk,             // 27 MHz, pin 4
+`ifdef LINK_SS
+    // parallel source-synchronous link instead of the serial UART (same byte
+    // granularity). host->node = command port, node->host = response port.
+    input  wire [7:0]  lk_rx_data,      // byte arriving from the host link fifo
+    input  wire        lk_rx_empty,     // fifo empty (no byte available)
+    output wire        lk_rx_rd,        // advance the host->node fifo
+    output wire [7:0]  lk_tx_data,      // byte to push toward the host
+    output wire        lk_tx_wr,        // write-enable pulse
+    input  wire        lk_tx_full,      // node->host fifo full (backpressure)
+`else
     input  wire        uart_rx,
     output wire        uart_tx,
+`endif
     output wire [5:0]  led,
 
     // SDRAM (magic port names, auto-routed par Gowin)
@@ -91,6 +105,15 @@ module top (
     output wire [10:0] O_sdram_addr,
     output wire [1:0]  O_sdram_ba,
     output wire [3:0]  O_sdram_dqm
+`ifdef SD_BOOT
+    ,output wire       sd_clk          // SD_CLK  (pin 83)
+    ,output wire       sd_cmd          // SD_CMD  / MOSI (pin 82)
+    ,input  wire       sd_dat0         // SD_DAT0 / MISO (pin 84)
+    ,output wire       sd_dat3         // SD_DAT3 / CS#  (pin 81)
+`endif
+`ifdef CLUSTER_NODE
+    ,output wire       clk_sys_out     // system clock for the on-chip sequencer + inter-FPGA link
+`endif
 );
 
     localparam D = 64;
@@ -102,6 +125,9 @@ module top (
         .clkout(clk_sys), .clkoutp(clk_sdram),
         .lock(pll_lock), .reset(1'b0), .clkin(clk)
     );
+`ifdef CLUSTER_NODE
+    assign clk_sys_out = clk_sys;
+`endif
 
     // Reset : attend PLL lock + 32k cycles d'init
     reg [15:0] init_cnt = 16'd0;
@@ -130,10 +156,62 @@ module top (
         else if (sd_refresh)              refresh_cnt <= 10'd0;
         else if (refresh_cnt != 10'd1023) refresh_cnt <= refresh_cnt + 10'd1;
     end
+
+    // ---- SD-card boot loader : SD -> SDRAM at power-on, then hand over to the FSM ----
+`ifdef SD_BOOT
+    wire        boot_done;
+    wire        booting = ~boot_done;
+    reg         boot_start = 1'b0, boot_started = 1'b0;
+    always @(posedge clk_sys or negedge rst_n) begin
+        if (!rst_n) begin boot_start <= 1'b0; boot_started <= 1'b0; end
+        else begin
+            boot_start <= 1'b0;
+            // wait for the SDRAM init (200us power-on) to finish before reading
+            // block 0, else its bytes fill the FIFO while the SDRAM is busy.
+            if (!boot_started && !sd_busy) begin boot_start <= 1'b1; boot_started <= 1'b1; end
+        end
+    end
+    wire [22:0] boot_addr; wire [7:0] boot_din; wire boot_wr; wire [15:0] boot_dbg;
+    wire boot_ready, boot_fail, boot_wpend, boot_drained;
+    sd_boot #(.HALF(SD_HALF), .NBLK(SD_NBLK)) u_boot (
+        .clk(clk_sys), .rstn(rst_n), .start(boot_start),
+        .sd_clk(sd_clk), .sd_cmd(sd_cmd), .sd_dat0(sd_dat0), .sd_dat3(sd_dat3),
+        .mem_addr(boot_addr), .mem_din(boot_din), .mem_wr(boot_wr),
+        .sdram_busy(sd_busy), .done(boot_done), .dbg_blk(boot_dbg),
+        .dbg_ready(boot_ready), .dbg_fail(boot_fail), .dbg_wpend(boot_wpend),
+        .drained(boot_drained));
+    // refresh the SDRAM during the (long) boot load, else early rows decay.
+    // Only refresh when the boot write path is drained (FIFO empty), so a refresh
+    // never catches a partially-full FIFO and overflows it (silent byte drops).
+    reg [9:0] bref_cnt = 10'd0; reg boot_ref = 1'b0;
+    always @(posedge clk_sys or negedge rst_n) begin
+        if (!rst_n) begin bref_cnt<=10'd0; boot_ref<=1'b0; end
+        else begin
+            boot_ref <= 1'b0;
+            if (booting) begin
+                if (bref_cnt >= 10'd378 && !sd_busy && !boot_wr && boot_drained) begin boot_ref<=1'b1; bref_cnt<=10'd0; end
+                else if (bref_cnt != 10'd1023) bref_cnt <= bref_cnt + 10'd1;
+            end
+        end
+    end
+    wire [22:0] eff_addr = booting ? boot_addr : sd_addr;
+    wire        eff_rd   = booting ? 1'b0     : sd_rd;
+    wire        eff_wr   = booting ? boot_wr  : sd_wr;
+    wire [7:0]  eff_din  = booting ? boot_din : sd_din;
+    wire        eff_ref  = booting ? boot_ref : sd_refresh;
+`else
+    wire        booting  = 1'b0;
+    wire [22:0] eff_addr = sd_addr;
+    wire        eff_rd   = sd_rd;
+    wire        eff_wr   = sd_wr;
+    wire [7:0]  eff_din  = sd_din;
+    wire        eff_ref  = sd_refresh;
+`endif
+
     sdram #(.FREQ(27_000_000)) u_sdram (
         .clk(clk_sys), .clk_sdram(clk_sdram), .resetn(rst_n),
-        .addr(sd_addr), .rd(sd_rd), .wr(sd_wr), .refresh(sd_refresh),
-        .din(sd_din), .dout(sd_dout), .dout32(),
+        .addr(eff_addr), .rd(eff_rd), .wr(eff_wr), .refresh(eff_ref),
+        .din(eff_din), .dout(sd_dout), .dout32(),
         .data_ready(sd_data_ready), .busy(sd_busy),
         .SDRAM_DQ(IO_sdram_dq), .SDRAM_A(O_sdram_addr), .SDRAM_BA(O_sdram_ba),
         .SDRAM_nCS(O_sdram_cs_n), .SDRAM_nWE(O_sdram_wen_n),
@@ -142,19 +220,32 @@ module top (
     );
 
     wire [7:0] rx_data; wire rx_valid;
-    uart_rx_8n1 #(.DIV(27)) u_rx (.clk(clk_sys), .rst(rst), .rx(uart_rx),
-                                    .data(rx_data), .valid(rx_valid));
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
-    uart_tx_8n1 #(.DIV(27)) u_tx (.clk(clk_sys), .rst(rst),
-                                    .data(tx_data), .send(tx_send),
-                                    .tx(uart_tx), .busy(tx_busy));
 
     reg       rx_pending = 1'b0;
     reg [7:0] rx_byte    = 8'd0;
     wire      rx_consume;
+
+`ifdef LINK_SS
+    // parallel link : same (data/valid) and (data/send/busy) interface as the
+    // UART PHYs, but bytes cross in a few cycles via async_fifo. rdy = !rx_pending
+    // so a byte is pulled only when the previous one has been consumed.
+    rx8_link u_rx (.clk(clk_sys), .rst(rst), .data(rx_data), .valid(rx_valid),
+                   .rdy(!rx_pending),
+                   .i_data(lk_rx_data), .i_empty(lk_rx_empty), .o_rd(lk_rx_rd));
+    tx8_link u_tx (.clk(clk_sys), .rst(rst), .data(tx_data), .send(tx_send),
+                   .busy(tx_busy),
+                   .o_data(lk_tx_data), .o_wr(lk_tx_wr), .i_full(lk_tx_full));
+`else
+    uart_rx_8n1 #(.DIV(27)) u_rx (.clk(clk_sys), .rst(rst), .rx(uart_rx),
+                                    .data(rx_data), .valid(rx_valid));
+    uart_tx_8n1 #(.DIV(27)) u_tx (.clk(clk_sys), .rst(rst),
+                                    .data(tx_data), .send(tx_send),
+                                    .tx(uart_tx), .busy(tx_busy));
+`endif
     always @(posedge clk_sys) begin
         if (rst)             rx_pending <= 1'b0;
-        else if (rx_valid)   begin rx_byte <= rx_data; rx_pending <= 1'b1; end
+        else if (rx_valid && !booting) begin rx_byte <= rx_data; rx_pending <= 1'b1; end
         else if (rx_consume) rx_pending <= 1'b0;
     end
 
@@ -199,7 +290,11 @@ module top (
     wire op_fm   = (op_sel == 4'd7);   // FM ou FQ (selon fq_mode)
     wire op_cn   = (op_sel == 4'd8);   // chain rmsnorm + matmul
     wire op_ee   = (op_sel == 4'd9);   // EE : embedding lookup (token -> x[64])
+`ifdef NODE_ONLY
+    wire op_gg   = 1'b0;                // NODE build : GG desactive (cluster = FN/FQ/MM/SS)
+`else
     wire op_gg   = (op_sel == 4'd10);  // GG : generation FSM (incremental v0..vN)
+`endif
     reg  fq_mode;                       // 0 = FM (int32), 1 = FQ (requant)
 
     // ---- Adresses hardcodees des poids stories260K (modele specifique) ----
@@ -445,6 +540,14 @@ module top (
         .dbg_exp_sum(dbg_attn_exp_sum),
         .dbg_inv_sum(dbg_attn_inv_sum)
     );
+
+    // Ports FM pour driver les BSRAMs durant dot product et store
+    // (declares ici, avant usage : Gowin tolere l'usage-avant-declaration,
+    //  mais Icarus/Verilator creent un wire implicite 1-bit puis entrent en conflit)
+    reg [9:0]        x_raddr_fm, w_raddr_fm;
+    reg [9:0]        out_waddr_fm;
+    reg signed [7:0] out_wdata_fm;
+    reg              out_we_fm;
 
     // MUX BSRAM ports : op_mh partage with attn ; op_fm prend la main pendant dot product
     wire use_attn = op_attn | op_mh;
@@ -880,11 +983,7 @@ module top (
         for (fq_i = 0; fq_i < 32; fq_i = fq_i + 1)
             if (max_abs[fq_i]) fq_lead_bit = fq_i[5:0];
     end
-    // Ports FM pour driver les BSRAMs durant dot product et store
-    reg [9:0]        x_raddr_fm, w_raddr_fm;
-    reg [9:0]        out_waddr_fm;
-    reg signed [7:0] out_wdata_fm;
-    reg              out_we_fm;
+    // (regs FM x_raddr_fm / w_raddr_fm / out_*_fm declares plus haut, avant usage)
 
     // Tableaux debug (mux selon op)
     // RMSNorm dbg = 8 oct ; SiLU dbg = 3 oct ; RoPE dbg = 8 oct (new_real[4] + new_imag[4])
@@ -1042,7 +1141,9 @@ module top (
                     else if (rx_byte == "C") state <= S_M2_C;
                     else if (rx_byte == "F") state <= S_M2_F;
                     else if (rx_byte == "E") state <= S_M2_E;
+`ifndef NODE_ONLY
                     else if (rx_byte == "G") state <= S_M2_G;
+`endif
                 end
                 S_M2_N: if (rx_pending) begin
                     if (rx_byte == "N") begin op_sel <= 4'd0; state <= S_NN_SX; end
@@ -1743,6 +1844,7 @@ module top (
                 // ---- GG v0 : embed + rmsnorm L0 -> x_norm[64] ----
                 // RX : 'G' 'G' tok_lo tok_hi sh_emb sh_rms_att  (6 bytes)
                 // TX : 'G' 'K' shift_out x_norm[64]              (67 bytes)
+`ifndef NODE_ONLY
                 S_M2_G: if (rx_pending) begin
                     if (rx_byte == "G") begin
                         op_sel          <= 4'd10;
@@ -2815,6 +2917,7 @@ module top (
                         state     <= S_IDLE;
                     end else tx_idx <= tx_idx + 10'd1;
                 end
+`endif
 
                 // ---- TX common ----
                 S_TX_M1: if (!tx_busy && !tx_send) begin
@@ -2957,6 +3060,13 @@ module top (
 
     reg [23:0] hb = 24'd0;
     always @(posedge clk_sys) hb <= hb + 24'd1;
+`ifdef SD_BOOT
+    // during boot: led[5]=solid (booting), led[4:0]=block counter (flickers=progress, frozen=stuck)
+    // boot diag on LEDs (lit = 1): [5]=heartbeat [4]=SD ready [3]=SD FAIL [2]=SDRAM busy [1]=write pending [0]=boot done
+    assign led = ~( booting ? {hb[23], boot_ready, boot_fail, sd_busy, boot_wpend, boot_done}
+                            : {state[3:0], op_silu, hb[23]} );
+`else
     assign led = ~{ state[3:0], op_silu, hb[23] };
+`endif
 
 endmodule
