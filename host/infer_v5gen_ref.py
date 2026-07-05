@@ -10,8 +10,10 @@
 #      position is right-shifted (integer) to a common reference shift = max of
 #      the T shifts. No float dequant/requant -> a hardware sequencer can do it
 #      with plain arithmetic right-shifts.
-#   2. Everything else identical to infer_v4sim (rmsnorm, matmul, silu, rope,
-#      softmax all in int8+pow2-shift).
+#   2. RoPE applied to all heads with a single output shift (no per-head float
+#      concat/requant) -> one global requantize, integer-mappable.
+#   3. Everything else identical to infer_v4sim (rmsnorm, matmul, silu, softmax
+#      all in int8+pow2-shift).
 #
 # Verified: produces exactly
 #   'Once upon a time, there was a little girl named Lily. She lo'
@@ -41,18 +43,17 @@ def forward_rtl(m, token, kv, pos):
         Q_i8, sQ = matvec_q(m['wq'][l], xn_i8, sxn)
         K_i8, sK = matvec_q(m['wk'][l], xn_i8, sxn)
         V_i8, sV = matvec_q(m['wv'][l], xn_i8, sxn)
-        Q = from_i8_shift(Q_i8, sQ).reshape(H, HS).astype(np.float32)
-        K = from_i8_shift(K_i8, sK).reshape(KH, HS).astype(np.float32)
-        V = from_i8_shift(V_i8, sV).reshape(KH, HS).astype(np.float32)
+        # rope applied to ALL heads at once (single output shift) : a hardware
+        # sequencer applies the same cos/sin to every pair, one global requantize.
         fr = m['freq_cis_real'][pos]; fi = m['freq_cis_imag'][pos]
-        Q_i8, sQ = apply_rope_q(*to_i8_shift(Q), fr, fi)
-        Kr_i8, sKr = apply_rope_q(*to_i8_shift(K), fr, fi)
-        Vv_i8, sVv = to_i8_shift(V)
+        Qr_i8, sQ = apply_rope_q(Q_i8.reshape(H, HS), sQ, fr, fi)
+        Kr_i8, sKr = apply_rope_q(K_i8.reshape(KH, HS), sK, fr, fi)
+        Qr_i8 = Qr_i8.reshape(-1); Kr_i8 = Kr_i8.reshape(-1)
         kv[l]['K'][pos] = Kr_i8.reshape(KH, HS); kv[l]['sK'][pos] = sKr
-        kv[l]['V'][pos] = Vv_i8.reshape(KH, HS); kv[l]['sV'][pos] = sVv
+        kv[l]['V'][pos] = V_i8.reshape(KH, HS); kv[l]['sV'][pos] = sV
 
         T = pos + 1
-        Q_f = from_i8_shift(Q_i8, sQ)
+        Q_f = from_i8_shift(Qr_i8, sQ).reshape(H, HS)
         # integer KV re-align : right-shift every position to the max shift
         sKref = max(kv[l]['sK'][p] for p in range(T))
         sVref = max(kv[l]['sV'][p] for p in range(T))
