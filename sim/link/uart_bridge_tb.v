@@ -27,7 +27,12 @@ module uart_bridge_tb (
         .clk_tx(clk_tx), .rst_tx_n(rst_n), .tx_data(w_data), .tx_send(w_wr), .tx_full(w_full),
         .clk_rx(clk_rx), .rst_rx_n(rst_n), .rx_rd(r_rd), .rx_data(r_data), .rx_empty(r_empty));
 
+    // emulate a consumer that acknowledges each byte : rdy drops on valid (byte
+    // accepted) and comes back high next cycle, giving rx8_link the rising edge it
+    // needs to release the following byte (mirrors top.v's rx_pending/rx_consume).
+    reg rx_rdy = 1'b1;
+    always @(posedge clk_rx) rx_rdy <= rst ? 1'b1 : ~rx_valid;
     rx8_link u_rx (
-        .clk(clk_rx), .rst(rst), .data(rx_byte), .valid(rx_valid), .rdy(1'b1),
+        .clk(clk_rx), .rst(rst), .data(rx_byte), .valid(rx_valid), .rdy(rx_rdy),
         .i_data(r_data), .i_empty(r_empty), .o_rd(r_rd));
 endmodule

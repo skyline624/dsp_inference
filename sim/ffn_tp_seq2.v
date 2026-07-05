@@ -34,8 +34,18 @@ module ffn_tp_seq2 #(
     input  wire signed [7:0] sx_in,
     input  wire signed [7:0] sw_rms, sw1, sw3, sw2,
     input  wire [22:0]     base,
+`ifdef LINK_SS
+    // parallel link : per-node command fifo (seq writes) + response fifo (seq reads).
+    output wire [8*NN-1:0] lk_cmd_data,   // byte to node i (packed)
+    output wire [NN-1:0]   lk_cmd_wr,
+    input  wire [NN-1:0]   lk_cmd_full,
+    input  wire [8*NN-1:0] lk_resp_data,  // byte from node i (packed)
+    input  wire [NN-1:0]   lk_resp_empty,
+    output wire [NN-1:0]   lk_resp_rd,
+`else
     output wire [NN-1:0]   n_rx,      // sequencer -> node i  (UART line)
     input  wire [NN-1:0]   n_tx,      // node i -> sequencer
+`endif
     output reg  [W*D-1:0]  result,
     output reg  signed [7:0] result_sh,
     output reg             done
@@ -68,20 +78,44 @@ module ffn_tp_seq2 #(
     reg signed [7:0] sg_[0:NN-1];    // shift of HG[c]  (from MUL, feeds W2 sx)
     reg signed [7:0] sp [0:NN-1];    // shift of P[c]   (from W2)
 
-    // one UART host, muxed to the target node (tgt = chunk index)
+    // one host TX/RX, muxed to the target node (tgt = chunk index)
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
     reg  [CW-1:0] tgt;
+    wire [7:0] rx_data; wire rx_valid;
+    // seq only pulls a response byte while it is streaming a response (st==RECV);
+    // this is the rx8_link 'rdy' handshake (see rx_rdy below).
+    wire rx_rdy;
+    genvar g;
+`ifdef LINK_SS
+    // parallel link : the single host TX adapter drives the fifo of node 'tgt';
+    // the single host RX adapter is fed by the fifo of node 'tgt'. A mux selects
+    // which node's fifo the shared adapters connect to.
+    wire [7:0] htx_data;  wire htx_wr;  wire htx_full;
+    wire       hrx_rd;    wire [7:0] hrx_data; wire hrx_empty;
+    tx8_link u_htx (.clk(clk), .rst(~rst_n), .data(tx_data), .send(tx_send),
+                    .busy(tx_busy), .o_data(htx_data), .o_wr(htx_wr), .i_full(htx_full));
+    rx8_link u_hrx (.clk(clk), .rst(~rst_n), .data(rx_data), .valid(rx_valid),
+                    .rdy(rx_rdy), .i_data(hrx_data), .i_empty(hrx_empty), .o_rd(hrx_rd));
+    // demux the shared adapter onto the per-node fifos
+    generate for (g=0; g<NN; g=g+1) begin: lmux
+        assign lk_cmd_data[8*g +: 8] = htx_data;
+        assign lk_cmd_wr[g]          = (tgt==g) ? htx_wr : 1'b0;
+        assign lk_resp_rd[g]         = (tgt==g) ? hrx_rd : 1'b0;
+    end endgenerate
+    assign htx_full  = lk_cmd_full[tgt];
+    assign hrx_data  = lk_resp_data[8*tgt +: 8];
+    assign hrx_empty = lk_resp_empty[tgt];
+`else
     wire host_tx; wire host_rx;
     uart_tx_8n1 #(.DIV(DIV)) u_htx (.clk(clk), .rst(~rst_n), .data(tx_data),
                                     .send(tx_send), .tx(host_tx), .busy(tx_busy));
-    wire [7:0] rx_data; wire rx_valid;
     uart_rx_8n1 #(.DIV(DIV)) u_hrx (.clk(clk), .rst(~rst_n), .rx(host_rx),
                                     .data(rx_data), .valid(rx_valid));
-    genvar g;
     generate for (g=0; g<NN; g=g+1) begin: nmux
         assign n_rx[g] = (tgt==g) ? host_tx : 1'b1;
     end endgenerate
     assign host_rx = n_tx[tgt];
+`endif
 
     // glue ALU (parallel DSP multiply + add, fed via serial staging)
     reg            alu_start, alu_op;
@@ -112,6 +146,17 @@ module ffn_tp_seq2 #(
     localparam IDLE=0,LOADX=1,BWAIT=2,BUILD=3,E_SET=4,E_BUSY=5,E_DONE=6,RECV=7,
                ALD_A=8,ALD_B=9,ALU_WAIT=10,AST_A=11,RED_COPY=12,DONE_ST=13;
     reg [3:0] st;
+
+    // pull a response byte only while streaming a response, and acknowledge one at
+    // a time : rx8_link releases the next byte on a RISING edge of rdy, so rdy must
+    // drop for one cycle after each delivered byte. rx_ack falls the cycle after a
+    // valid pulse, re-arming the adapter for the following byte (mirrors the node's
+    // rx_pending/rx_consume). Without this, a level-high rdy delivers only 1 byte.
+    reg rx_ack;
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) rx_ack <= 1'b1;
+        else        rx_ack <= ~rx_valid;
+    assign rx_rdy = (st == RECV) & rx_ack;
 
     // ---- per-(phase,chunk,rk) slot selection (combinational) ----
     always @(*) begin

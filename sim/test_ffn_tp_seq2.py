@@ -85,7 +85,16 @@ async def test_ffn_tp_seq2(dut):
     W2_i8, sw2  = quantize_matrix(W2_f)
 
     # split the hidden dim (= NN*D) into NN chunks of D rows, one per node.
-    sd = [dut.nodes[c].u_n.u_sdram for c in range(NN)]
+    # SDRAM behavioral model path differs between tops : in the UART top it is
+    # node_top.u_sdram (nodes[c].u_n.u_sdram); in the ss_link top it is a sibling
+    # of the top instance (nodes[c].u_sdram). Resolve whichever exposes .mem.
+    def sdram_of(c):
+        node = dut.nodes[c]
+        for h in (getattr(getattr(node, "u_n", node), "u_sdram", None), getattr(node, "u_sdram", None)):
+            if h is not None and hasattr(h, "mem"):
+                return h
+        return node.u_n.u_sdram   # fall back (raises with a clear path if wrong)
+    sd = [sdram_of(c) for c in range(NN)]
     for c in range(NN):
         r0, r1 = c * D, (c + 1) * D
         # chunk c : W1/W3 rows[r0:r1], W2 cols[r0:r1] ; rms only needed on node 0

@@ -14,7 +14,9 @@
 // =============================================================================
 
 // ---- transmit adapter : same interface as uart_tx_8n1 (data/send/busy) -------
-module tx8_link (
+module tx8_link #(
+    parameter HOLD = 4            // cycles busy stays high after commit
+) (
     input  wire       clk,
     input  wire       rst,
     input  wire [7:0] data,
@@ -25,16 +27,23 @@ module tx8_link (
     output reg        o_wr,      // 1-cycle write-enable pulse
     input  wire       i_full     // backpressure : fifo cannot accept a byte
 );
+    // States : 0 = idle, 1 = waiting for fifo room, 2 = draining HOLD cycles.
+    // The HOLD tail matters : the driving FSM streams a byte, drops busy, then
+    // does read-setup -> send for the next byte. A real UART's busy lasts ~270
+    // cycles, which hid the node's obuf read-latency (S_TX_O_RD -> S_TX_O_W).
+    // With an instant fifo write, busy must still linger a few cycles so the
+    // node's registered obuf_rdata settles before the next send samples it.
+    reg [1:0] ph;
+    reg [3:0] hcnt;
     always @(posedge clk) begin
         o_wr <= 1'b0;
-        if (rst) begin
-            busy <= 1'b0;
-        end else if (!busy) begin
-            if (send) begin o_data <= data; busy <= 1'b1; end
-        end else begin
-            // wait for room, then commit exactly one byte and release busy
-            if (!i_full) begin o_wr <= 1'b1; busy <= 1'b0; end
-        end
+        if (rst) begin busy <= 1'b0; ph <= 2'd0; hcnt <= 4'd0; end
+        else case (ph)
+            2'd0: if (send) begin o_data <= data; busy <= 1'b1; ph <= 2'd1; end
+            2'd1: if (!i_full) begin o_wr <= 1'b1; hcnt <= HOLD[3:0]; ph <= 2'd2; end
+            default: if (hcnt == 4'd0) begin busy <= 1'b0; ph <= 2'd0; end
+                     else hcnt <= hcnt - 4'd1;
+        endcase
     end
 endmodule
 
@@ -55,16 +64,25 @@ module rx8_link (
     input  wire       i_empty,
     output reg        o_rd       // 1-cycle read-enable pulse (advance the fifo)
 );
+    // One-byte-per-acknowledge handshake. A single 'rdy' level is not enough : if
+    // rdy stays high while the consumer takes >1 cycle to register a byte, this
+    // adapter would deliver a second byte the consumer never latched (dropped).
+    // So we require rdy to have gone low (byte accepted) and come back high before
+    // delivering the next : we track the previous rdy and fire only on its rising
+    // edge, guaranteeing exactly one (data,valid) per consumer acknowledge.
+    reg armed;                    // ready to deliver the next byte
     always @(posedge clk) begin
         valid <= 1'b0;
         o_rd  <= 1'b0;
-        // pull one byte only when the fifo has data, the consumer is ready, and
-        // we're not already advancing (o_rd gating spaces reads one cycle apart so
-        // the fifo read pointer settles before the next capture).
-        if (!rst && !i_empty && !o_rd && rdy) begin
+        if (rst) begin
+            armed <= 1'b1;
+        end else if (armed && rdy && !i_empty && !o_rd) begin
             data  <= i_data;
             valid <= 1'b1;
             o_rd  <= 1'b1;
+            armed <= 1'b0;        // wait for the consumer to drop rdy (accept) ...
+        end else if (!rdy) begin
+            armed <= 1'b1;        // ... then re-arm when it is ready again
         end
     end
 endmodule
