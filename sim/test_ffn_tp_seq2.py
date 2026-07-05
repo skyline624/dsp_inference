@@ -9,6 +9,7 @@ sequencer computes correctly, not only that it routes.
 """
 
 import math
+import os
 import random
 import cocotb
 from cocotb.clock import Clock
@@ -17,7 +18,8 @@ from cocotb.triggers import RisingEdge, ClockCycles
 CLK_NS = 37
 D = 64
 K = 64
-HID = 128
+NN = int(os.environ.get("NN", "2"))   # tensor-parallel degree (match -Pffn_tp_seq2_top.NN)
+HID = NN * D                          # hidden dim = NN chunks of D
 A_RMS, A_W1, A_W3, A_W2 = 0x100000, 0x101000, 0x102000, 0x103000
 
 
@@ -82,17 +84,16 @@ async def test_ffn_tp_seq2(dut):
     W3_i8, sw3  = quantize_matrix(W3_f)
     W2_i8, sw2  = quantize_matrix(W2_f)
 
-    H = HID // 2
-    n0, n1 = dut.u_n0.u_sdram, dut.u_n1.u_sdram
-    # node0 : rms, W1 rows[0:64], W3 rows[0:64], W2 cols[0:64]
-    preload(n0, A_RMS, bytes((v & 0xFF) for v in rms_i8))
-    preload(n0, A_W1, bytes((W1_i8[r][k] & 0xFF) for r in range(0, H) for k in range(K)))
-    preload(n0, A_W3, bytes((W3_i8[r][k] & 0xFF) for r in range(0, H) for k in range(K)))
-    preload(n0, A_W2, bytes((W2_i8[r][k] & 0xFF) for r in range(D) for k in range(0, H)))
-    # node1 : W1 rows[64:128], W3 rows[64:128], W2 cols[64:128]
-    preload(n1, A_W1, bytes((W1_i8[r][k] & 0xFF) for r in range(H, HID) for k in range(K)))
-    preload(n1, A_W3, bytes((W3_i8[r][k] & 0xFF) for r in range(H, HID) for k in range(K)))
-    preload(n1, A_W2, bytes((W2_i8[r][k] & 0xFF) for r in range(D) for k in range(H, HID)))
+    # split the hidden dim (= NN*D) into NN chunks of D rows, one per node.
+    sd = [dut.nodes[c].u_n.u_sdram for c in range(NN)]
+    for c in range(NN):
+        r0, r1 = c * D, (c + 1) * D
+        # chunk c : W1/W3 rows[r0:r1], W2 cols[r0:r1] ; rms only needed on node 0
+        if c == 0:
+            preload(sd[c], A_RMS, bytes((v & 0xFF) for v in rms_i8))
+        preload(sd[c], A_W1, bytes((W1_i8[r][k] & 0xFF) for r in range(r0, r1) for k in range(K)))
+        preload(sd[c], A_W3, bytes((W3_i8[r][k] & 0xFF) for r in range(r0, r1) for k in range(K)))
+        preload(sd[c], A_W2, bytes((W2_i8[r][k] & 0xFF) for r in range(D) for k in range(r0, r1)))
 
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 5)
@@ -127,10 +128,12 @@ async def test_ffn_tp_seq2(dut):
 
     ma = max(abs(v) for v in ref) or 1.0
     err = max(abs(got[i]-ref[i]) for i in range(D))
-    dut._log.info(f"  autonomous TP-FFN v2 (2 nodes): max_err={err:.4f} ({100*err/ma:.1f}% of range)")
+    dut._log.info(f"  autonomous TP-FFN v2 (NN={NN} node(s), hidden={HID}): "
+                  f"max_err={err:.4f} ({100*err/ma:.1f}% of range)")
     assert err/ma < 0.35, f"TP-FFN v2 output too far from reference ({err})"
 
     dut._log.info(
-        "PHASE-0 GATE PASS: ffn_tp_seq2 (LUT-lean) splits the FFN across 2 nodes "
-        "(W1/W3 row-parallel, W2 col-parallel + all-reduce), matches float FFN, zero PC."
+        f"GATE PASS: ffn_tp_seq2 (LUT-lean, NN={NN}) ran the FFN "
+        "(W1/W3 row-parallel, W2 col-parallel + all-reduce), matches float FFN, zero PC. "
+        + ("mono-card autonomous (reduce skipped)." if NN == 1 else f"{NN}-node tensor-parallel.")
     )
