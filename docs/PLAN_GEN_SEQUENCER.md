@@ -72,12 +72,32 @@ Budget : `vfile` passe de ~14 slots à ~20 slots × 64 = 1280 octets. Reste peti
 ## Découpage en étapes (chaque étape = 1 gate sim vert avant la suivante)
 
 ### Étape A — Embedding
+> **État** : ✅ **validée** (commit `6eb4269`), **mais son interface a été remplacée**.
+> L'étape B a substitué l'interface embedding (`cur_tok`/`xb_out`) par l'interface
+> attention (`x_in`/`result`) : l'embedding a été **retiré volontairement** de
+> `gen_seq` et **reviendra à l'étape F** (boucle tokens, où le KV persiste). En
+> conséquence `test_gen_A` **ne compile plus** contre le `gen_seq` actuel — échec
+> d'**élaboration** (ports disparus), **pas** une régression logique. Ne pas le
+> relancer comme non-régression G4 tant que l'embed n'est pas réintégré en F.
+
 Ajouter une phase `PH_EMB` : envoyer la commande `EE tok` au nœud, écrire les 64
 octets de réponse dans `vfile[XB]`. Le token vient d'un registre `cur_tok`.
 - **Gate A** : `test_gen_A` — après EE, `vfile[XB]` == `tok_emb[tok]` (préchargé).
 - Coût : faible. C'est le patron FN/FQ déjà en place, autre commande.
 
 ### Étape B — Attention causale en style `vfile` (le gros morceau)
+> **État** : 🟢 **VERTE** (commit `65a730a`). `test_gen_B` PASS —
+> `max_err=0.068 (2.3%)` vs gate `<35%` (attn+residual, pos=0).
+> **Cause racine du `result=X`** qui bloquait depuis le WIP `9edf5eb` : le buffer
+> TX `pkt` était déclaré `reg [7:0] pkt [0:15]` alors que les 3 octets d'adresse
+> poids sont écrits/lus en `pkt[68..71]` (FN : `pkt[68..70]` ; Wx : `pkt[69..71]`).
+> Écriture hors-borne ignorée, **lecture hors-borne → X** : les adresses
+> `A_RMS`/`A_WQ`/… envoyées au nœud sortaient en X → compute nœud = X →
+> `vfile[XN]=X` dès la phase FN, alors que le FSM complétait quand même (DONE levé).
+> Illustration parfaite de G1 (« ça route ≠ ça marche »). **Fix** : `pkt [0:15]` →
+> `pkt [0:79]` (aligné sur `ffn_tp_seq2.v`, l'original validé). Trouvé par **diff à
+> froid** du bloc TX/RECV contre l'original — le VCD n'a pas été nécessaire.
+
 Porter `attn_causal_seq` (Phase 5b, registres larges, validé) dans le `vfile` :
 1. `PH_FN_ATT` : FN(XB, rms_att) → XN  *(déjà le patron FFN)*
 2. `PH_WQ/WK/WV` : FQ(XN) → Q / Kcur / Vcur  *(patron FFN, 3 tailles : 64,32,32)*
