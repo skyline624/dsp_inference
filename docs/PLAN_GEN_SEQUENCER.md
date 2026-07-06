@@ -139,6 +139,20 @@ dans `XB` pour la couche suivante.
 - **Gate C** : `test_gen_C` — une couche complète (att+ffn) à pos=0 vs oracle.
 
 ### Étape D — Boucle 5 couches
+> **État** : 🟢 **VERTE** (commit `93a41a9`). `test_gen_D` PASS —
+> `max_err=0.8625 (16.0%)` vs gate `<0.60` (5 couches, pos=0). Accumulation
+> sous-linéaire (1 couche 5.8 % → 5 couches 16 %) grâce aux résiduels requantifiants.
+> **G2** (`prove_gen_layers.py`) : 5 couches quantifié vs float = 0.093.
+> **Réalisé** : (1) **KV-cache par couche** — `kmem/vmem [NL*TMAX*KVW]`,
+> `ksh/vsh [NL*TMAX]`, indexés `(layer,pos)` ; le scan max-shift balaie la couche
+> courante. (2) **`base_l` interne** = `LBASE + layer*0x10000` (via `{layer,16'b0}`,
+> piège de largeur évité), layout SDRAM réel stories260K — remplace les adresses
+> synthétiques `A_*`. Boucle `layer 0..4`, XB carry-over (reste dans `vfile[XB]`),
+> `sxb` propagé (PH_FN utilise `sxb`, plus `sx0`). **Poids : shift PARTAGÉ par type**
+> sur les 5 couches (ports `sw_*` statiques ; per-layer shifts = interface plus
+> large, différé — à traiter en F si le modèle réel l'exige). Le check standalone de
+> dé-risquage a attrapé un bug (`shared_shift` sur listes 1D) **avant** la sim.
+
 Compteur `layer 0..4`, `base = 0x010000 + layer*0x10000` (déjà le port `base`).
 À la fin de chaque couche : `XB ← YV`, `layer++`. Après couche 4 → lm_head.
 - **Gate D** : `test_gen_D` — 5 couches à pos=0, x_after_5layers vs oracle Python.
