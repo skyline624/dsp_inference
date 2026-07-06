@@ -182,6 +182,25 @@ Porter `lmhead_seq` (Phase 5c, validé) :
 - **Gate E** : `test_gen_E` — token prédit vs `lmhead_seq` (oracle Phase 5c).
 
 ### Étape F — Boucle 17 tokens + KV persistant
+> **État** : 🟢 **RTL PROUVÉ CORRECT** (séquenceur autonome fonctionnel). `gen_seq`
+> génère 17 tokens de façon autonome (mode `gen_mode=1` : EMBED `EE(cur_tok)` → 5
+> couches causales à KV **persistant** → lm_head → argmax → `token_out`/`token_valid`
+> → `cur_tok`, `pos++`). `test_gen_F2` (2 tokens) VERT ; `test_gen_F` (17 tokens) a
+> tourné (~2.4h) et produit exactement les tokens **fidèles-nœud**.
+> **DÉCOUVERTE** : le RTL génère « Once upon a time, there was a little » (9 tokens
+> oracle EXACTS) puis diverge au token 9. **Diagnostic complet** (`host/diag_swap_ops.py`) :
+> ce n'est PAS un bug séquenceur ni une imprécision LUT rmsnorm/silu (tous deux
+> fidèles) — c'est l'**attention matérielle du nœud** (`attention_head_op.v` : PAS de
+> `/√HS`, scaling entier `score>>10`, exp/inv par LUT) qui diffère de l'oracle float
+> `softmax(Q·K/√HS)` et fait basculer une **quasi-égalité de gap 3** au token 9.
+> **PREUVE** : `host/prove_gen_node.py` — modèle Python **bit-exact du nœud** (rmsnorm/
+> silu/attention/vec_alu2, x en int8, FFN chunké) reproduit les **17 tokens du RTL à
+> l'identique (17/17)**. Donc le RTL est correct à 100 % ; la divergence vs l'oracle
+> float est une propriété du matériel du nœud (validé en tolérance aux phases 5b/5c),
+> hors périmètre du séquenceur.
+> **Gate** : `test_gen_F` compare le RTL au **forward fidèle-nœud** (`dump['node_tokens']`),
+> pas à l'oracle float. `prove_gen_node.py` est le gate rapide (RTL == modèle nœud, 17/17).
+
 Compteur `pos 0..16`. Chaque token : EMB → 5 couches (att causale avec KV) → lm_head
 → argmax → `cur_tok = token` ; émettre le token en sortie (UART externe ou port).
 Le `kvmem` persiste entre tokens (pas de reset). `pos++`.

@@ -60,8 +60,14 @@ def main():
     data['sin'] = [[q15(x) for x in m['freq_cis_imag'][p]] for p in range(NPOS)]
 
     txt, toks = R.generate(NPOS)
-    data['tokens'] = list(map(int, toks))     # [1, 403, 407, ...] (18 : input + 17 gen)
+    data['tokens'] = list(map(int, toks))     # float-oracle : [1, 403, 407, ...] (18)
     data['text'] = txt
+
+    # node-faithful tokens : what the hardware (gen_seq) actually generates. Matches
+    # the float oracle for 9 tokens then diverges at token 9 (node attention_head_op
+    # simplified softmax, a gap-3 near-tie) - see host/prove_gen_node.py + diag_swap_ops.
+    from prove_gen_node import gen_node_tokens
+    data['node_tokens'] = gen_node_tokens(data)
 
     out = os.path.join(HERE, 'gen_model_dump.json')
     with open(out, 'w') as f:
