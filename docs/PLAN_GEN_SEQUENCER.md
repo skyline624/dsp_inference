@@ -119,6 +119,19 @@ Porter `attn_causal_seq` (Phase 5b, registres larges, validé) dans le `vfile` :
   (2) sKref/sVref seed -128, (3) streaming MM par compteurs, pas div/mod.
 
 ### Étape C — FFN (déjà présent, à re-câbler sur XB/XN)
+> **État** : 🟢 **VERTE** (commit `004129c`). `test_gen_C` PASS —
+> `max_err=0.2051 (5.8%)` vs gate `<0.40` (couche complète att+ffn, pos=0).
+> **G2 d'abord** (`host/prove_gen_ffn_chunk.py`) : chunking 64+64+44 prouvé fidèle
+> (worst chunk-vs-float=0.061). **Portage** : le FFN reste chunké 3×64 (pas la
+> découpe NN de `ffn_tp_seq2`), lignes W1/W3 172..191 et colonnes W2 172..191
+> **préchargées à zéro** → chaque chunk est une op 64 propre (silu(0)=0, shift non
+> contaminé). MUL SwiGLU + reduce W2 via `vec_alu2`. **2 bugs corrigés avant vert** :
+> (1) `fc<<12` (piège largeur Verilog sur 2 bits = 0) → `{fc,12'b0}` ; (2) **saturation
+> du résiduel** : le RESID inline `clip8` sans requantize saturait (43.8% FAIL) → les
+> deux résiduels passent par `vec_alu2` ADD (align **puis** requantize), comme
+> l'oracle. **⚠ `test_gen_B` (attn seul) est supersédé** : `gen_seq` fait désormais
+> toujours attn+ffn (comme A l'a été par B).
+
 Le FFN de `ffn_tp_seq2` existe déjà. Le raccorder : après attention, `XB` contient
 `x + attn`. Lancer le FFN existant (`FN_ffn → W1/W3/SS/MUL/W2 → RES`) avec `base+0x3100`
 pour rms_ffn. HID=172 → 3 chunks (déjà géré). Résultat `YV = XB + ffn` → recopier
