@@ -76,7 +76,7 @@ module gen_seq #(
     rx8_link u_rx (.clk(clk), .rst(~rst_n), .data(rx_data), .valid(rx_valid),
                    .rdy(rx_rdy), .i_data(lk_resp_data), .i_empty(lk_resp_empty), .o_rd(lk_resp_rd));
 
-    reg [7:0] pkt [0:15];
+    reg [7:0] pkt [0:79];
     reg [9:0] pkt_len, resp_len, idx, rcnt;
     reg [6:0] ldi;
     reg [23:0] bcnt;
