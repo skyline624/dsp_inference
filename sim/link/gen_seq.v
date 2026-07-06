@@ -26,15 +26,18 @@ module gen_seq #(
     parameter H = 8, parameter KH = 4, parameter HS = 8,
     parameter TMAX = 32,
     parameter BOOT = 40000,
-    parameter A_RMS = 23'h100000,
-    parameter A_WQ  = 23'h101000,
-    parameter A_WK  = 23'h102000,
-    parameter A_WV  = 23'h103000,
-    parameter A_WO  = 23'h104000,
-    parameter A_RMSFF = 23'h105000,       // ffn rmsnorm weight
-    parameter A_W1  = 23'h106000,         // ffn W1  [HID,64], chunk c @ +c*0x1000
-    parameter A_W3  = 23'h109000,         // ffn W3  [HID,64], chunk c @ +c*0x1000
-    parameter A_W2  = 23'h10C000          // ffn W2  chunk c = [64,64] @ +c*0x1000
+    parameter NL   = 5,                   // number of transformer layers
+    parameter LBASE = 23'h010000,         // layer 0 weight base (base_l = LBASE + layer*0x10000)
+    // per-layer weight offsets (stories260K SDRAM layout)
+    parameter OFF_RMS   = 23'h000000,
+    parameter OFF_WQ    = 23'h000100,
+    parameter OFF_WK    = 23'h001100,
+    parameter OFF_WV    = 23'h001900,
+    parameter OFF_WO    = 23'h002100,
+    parameter OFF_RMSFF = 23'h003100,
+    parameter OFF_W1    = 23'h003200,     // W1 [HID,64], chunk c @ +c*0x1000
+    parameter OFF_W3    = 23'h006200,     // W3 [HID,64], chunk c @ +c*0x1000
+    parameter OFF_W2    = 23'h009200      // W2 chunk c = [64,64] @ +c*0x1000
 ) (
     input  wire            clk, rst_n, start,
     input  wire [W*D-1:0]  x_in,          // step-B: external x (bypasses embed)
@@ -69,11 +72,11 @@ module gen_seq #(
     reg [AW-1:0] vaddr; reg [7:0] vdin; reg vwe;
     function [AW-1:0] vidx; input [SW-1:0] slot; input [5:0] b; vidx = (slot<<6)|b; endfunction
 
-    // ---- KV cache : separate BSRAM ----
-    reg signed [7:0] kmem [0:TMAX*KVW-1];
-    reg signed [7:0] vmem [0:TMAX*KVW-1];
-    reg signed [7:0] ksh  [0:TMAX-1];
-    reg signed [7:0] vsh  [0:TMAX-1];
+    // ---- KV cache : separate BSRAM, indexed by (layer, pos) ----
+    reg signed [7:0] kmem [0:NL*TMAX*KVW-1];
+    reg signed [7:0] vmem [0:NL*TMAX*KVW-1];
+    reg signed [7:0] ksh  [0:NL*TMAX-1];
+    reg signed [7:0] vsh  [0:NL*TMAX-1];
 
     // ---- ss_link byte adapters ----
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
@@ -107,6 +110,8 @@ module gen_seq #(
     // FFN hidden dim HID=172 is chunked 3x64 with W1/W3 rows 172..191 zero-padded
     // (test preload) so every chunk is a clean 64-wide op : silu(0)=0, no stale
     // value contaminates the per-chunk output shift, and W2 cols 172..191 are 0.
+    reg [2:0] layer;                         // current transformer layer 0..NL-1
+    wire [22:0] base_l = base + LBASE + {layer,16'b0};   // = base + LBASE + layer*0x10000
 
     function signed [7:0] clip8; input signed [31:0] v;
         clip8 = (v > 127) ? 8'sd127 : (v < -128) ? -8'sd128 : v[7:0]; endfunction
@@ -149,7 +154,7 @@ module gen_seq #(
         if (!rst_n) begin
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0;
-            alu_start<=0; fc<=0; in_ffn<=0;
+            alu_start<=0; fc<=0; in_ffn<=0; layer<=0;
         end else begin
             tx_send<=0; done<=0; vwe<=0; alu_start<=0;
             if (vwe) vfile[vaddr] <= vdin;
@@ -157,7 +162,7 @@ module gen_seq #(
             case (st)
                 // load external x into vfile[XB], then start the attention block
                 IDLE: if (start) begin sx0<=sx_in; sxn<=sx_in; sxb<=sx_in;
-                        phase<=PH_FN; fc<=0; in_ffn<=0; bcnt<=0; ldi<=0; st<=LOADX; end
+                        phase<=PH_FN; fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0; st<=LOADX; end
                 LOADX: begin vaddr<=vidx(SB_XB, ldi[5:0]); vdin<=x_in[ldi*W +: W]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; st<=BWAIT; end else ldi<=ldi+1; end
                 BWAIT: if (bcnt==BOOT) st<=BUILD; else bcnt<=bcnt+1;
@@ -165,20 +170,20 @@ module gen_seq #(
                 BUILD: begin
                     case (phase)
                         PH_FN: begin
-                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sx0;pkt[3]<=sw_rms;
-                            pkt[68]<=a0(A_RMS+base);pkt[69]<=a1(A_RMS+base);pkt[70]<=a2(A_RMS+base);
+                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rms;
+                            pkt[68]<=a0(base_l+OFF_RMS);pkt[69]<=a1(base_l+OFF_RMS);pkt[70]<=a2(base_l+OFF_RMS);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_WQ: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=H*HS;pkt[3]<=sxn;pkt[4]<=swq;
-                            pkt[69]<=a0(A_WQ+base);pkt[70]<=a1(A_WQ+base);pkt[71]<=a2(A_WQ+base);
+                            pkt[69]<=a0(base_l+OFF_WQ);pkt[70]<=a1(base_l+OFF_WQ);pkt[71]<=a2(base_l+OFF_WQ);
                             pkt_len<=72; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS; end
                         PH_WK: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swk;
-                            pkt[69]<=a0(A_WK+base);pkt[70]<=a1(A_WK+base);pkt[71]<=a2(A_WK+base);
+                            pkt[69]<=a0(base_l+OFF_WK);pkt[70]<=a1(base_l+OFF_WK);pkt[71]<=a2(base_l+OFF_WK);
                             pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=KH*HS; end
                         PH_WV: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swv;
-                            pkt[69]<=a0(A_WV+base);pkt[70]<=a1(A_WV+base);pkt[71]<=a2(A_WV+base);
+                            pkt[69]<=a0(base_l+OFF_WV);pkt[70]<=a1(base_l+OFF_WV);pkt[71]<=a2(base_l+OFF_WV);
                             pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Vc; Nfq<=KH*HS; end
                         PH_MM: begin
                             pkt[0]<="M";pkt[1]<="M";pkt[2]<=sQ;pkt[3]<=sKref;pkt[4]<=sVref;
@@ -188,20 +193,20 @@ module gen_seq #(
                             src_slot<=SB_Q; end
                         PH_WO: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo;
-                            pkt[69]<=a0(A_WO+base);pkt[70]<=a1(A_WO+base);pkt[71]<=a2(A_WO+base);
+                            pkt[69]<=a0(base_l+OFF_WO);pkt[70]<=a1(base_l+OFF_WO);pkt[71]<=a2(base_l+OFF_WO);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0]; end
                         // ---- FFN ----
                         PH_FN2: begin  // rmsnorm(XB, rms_ffn) -> XN
                             pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf;
-                            pkt[68]<=a0(A_RMSFF+base);pkt[69]<=a1(A_RMSFF+base);pkt[70]<=a2(A_RMSFF+base);
+                            pkt[68]<=a0(base_l+OFF_RMSFF);pkt[69]<=a1(base_l+OFF_RMSFF);pkt[70]<=a2(base_l+OFF_RMSFF);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_FW1: begin  // W1_chunk(XN) -> H1 (SB_Q), N_out=64 (zero-padded)
-                            waddr = A_W1 + base + {fc,12'b0};
+                            waddr = base_l + OFF_W1 + {fc,12'b0};
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D[7:0]; end
                         PH_FW3: begin  // W3_chunk(XN) -> H3 (SB_Kc)
-                            waddr = A_W3 + base + {fc,12'b0};
+                            waddr = base_l + OFF_W3 + {fc,12'b0};
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D[7:0]; end
@@ -209,7 +214,7 @@ module gen_seq #(
                             pkt[0]<="S";pkt[1]<="S";pkt[2]<=s1c;
                             pkt_len<=67; resp_len<=70; src_slot<=SB_Q; dst_slot<=SB_Vc; Nfq<=D[7:0]; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
-                            waddr = A_W2 + base + {fc,12'b0};
+                            waddr = base_l + OFF_W2 + {fc,12'b0};
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D[7:0]; end
@@ -227,8 +232,8 @@ module gen_seq #(
                     else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
                     else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
                     else if (phase==PH_MM && idx>=(6+D)) begin
-                        if (!mmv) tx_data <= clip8( $signed(kmem[mmp*KVW + mmo]) >>> (sKref - ksh[mmp]) );
-                        else      tx_data <= clip8( $signed(vmem[mmp*KVW + mmo]) >>> (sVref - vsh[mmp]) );
+                        if (!mmv) tx_data <= clip8( $signed(kmem[layer*TMAX*KVW + mmp*KVW + mmo]) >>> (sKref - ksh[layer*TMAX + mmp]) );
+                        else      tx_data <= clip8( $signed(vmem[layer*TMAX*KVW + mmp*KVW + mmo]) >>> (sVref - vsh[layer*TMAX + mmp]) );
                     end
                     else tx_data<=pkt[idx];
                     tx_send<=1; st<=E_BUSY;
@@ -348,17 +353,17 @@ module gen_seq #(
 
                 // copy roped Kc / Vc into kvmem[pos], store shifts
                 KVWR: begin
-                    kmem[pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Kc, ldi[5:0])]);
-                    vmem[pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Vc, ldi[5:0])]);
+                    kmem[layer*TMAX*KVW + pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Kc, ldi[5:0])]);
+                    vmem[layer*TMAX*KVW + pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Vc, ldi[5:0])]);
                     if (ldi==KVW-1) begin
-                        ksh[pos]<=sK; vsh[pos]<=sV;
+                        ksh[layer*TMAX + pos]<=sK; vsh[layer*TMAX + pos]<=sV;
                         sKref<=-8'sd128; sVref<=-8'sd128; scan_i<=0; st<=SCAN;
                     end else ldi<=ldi+1;
                 end
-                // serial max-shift scan over positions 0..pos (seed -128)
+                // serial max-shift scan over positions 0..pos of the CURRENT layer (seed -128)
                 SCAN: begin
-                    if (ksh[scan_i] > sKref) sKref<=ksh[scan_i];
-                    if (vsh[scan_i] > sVref) sVref<=vsh[scan_i];
+                    if (ksh[layer*TMAX + scan_i] > sKref) sKref<=ksh[layer*TMAX + scan_i];
+                    if (vsh[layer*TMAX + scan_i] > sVref) sVref<=vsh[layer*TMAX + scan_i];
                     if (scan_i==pos) begin mmp<=0; mmo<=0; mmv<=1'b0; phase<=PH_MM; st<=BUILD; end
                     else scan_i<=scan_i+1;
                 end
@@ -394,9 +399,13 @@ module gen_seq #(
                                           alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sov; alu_next<=2'd2;
                                           ldi<=0; st<=ALD_A;
                                       end else begin fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
-                                default: begin  // residual done : chain attn->FFN, or finish
-                                          if (!in_ffn) begin in_ffn<=1'b1; phase<=PH_FN2; st<=BUILD; end
-                                          else st<=DONE_ST;
+                                default: begin  // residual done
+                                          if (!in_ffn) begin in_ffn<=1'b1; phase<=PH_FN2; st<=BUILD; end  // attn -> FFN
+                                          else if (layer==NL-1) st<=DONE_ST;                              // last layer
+                                          else begin  // next layer : XB carries over, KV persists
+                                              layer<=layer+1; in_ffn<=1'b0; fc<=2'd0;
+                                              phase<=PH_FN; ldi<=0; st<=BUILD;
+                                          end
                                       end
                             endcase
                         end else ldi<=ldi+1; end
