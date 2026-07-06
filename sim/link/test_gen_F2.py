@@ -1,0 +1,113 @@
+"""Step F intermediate gate : autonomous generation, first N_TOK=2 tokens.
+
+Validates the token loop mechanics BEFORE the full (very long) 17-token run :
+embed (EE), the token loop, pos increment, the PERSISTENT KV cache (token 1 at
+pos=1 reads token 0's KV at pos=0), and the multi-position causal MM. The first
+tokens must match the oracle [403, 407, ...].
+
+Loads host/gen_model_dump.json (real stories260K, quantised on the host with numpy
+since numpy is absent from the sim Docker). Real-model logits are well separated so
+the argmax is robust (no synthetic gap-2 fragility).
+
+  make -f Makefile.gen MODULE=test_gen_F2
+"""
+import json
+import os
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, ClockCycles, with_timeout
+
+N_TOK = 2
+D, H, KH, HS, HID, NL, VOCAB = 64, 8, 4, 8, 172, 5, 512
+LBASE, LSTRIDE = 0x010000, 0x010000
+A_RMSFINAL, A_EMB = 0x060000, 0x000000
+OFF = dict(rms_att=0x0000, wq=0x0100, wk=0x1100, wv=0x1900, wo=0x2100,
+           rms_ffn=0x3100, w1=0x3200, w3=0x6200, w2=0x9200)
+DUMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "host", "gen_model_dump.json")
+
+
+def preload(sd, base, data):
+    wb = base >> 2; b = bytes((v & 0xFF) for v in data)
+    if len(b) % 4: b += bytes(4 - len(b) % 4)
+    for w in range(len(b)//4):
+        sd.mem[wb+w].value = b[4*w]|(b[4*w+1]<<8)|(b[4*w+2]<<16)|(b[4*w+3]<<24)
+def rows(M, a, b, cols): return [M[r][k] for r in range(a, b) for k in range(cols)]
+def pack(vals): return sum((v & 0xFF) << (i*8) for i, v in enumerate(vals))
+
+
+def preload_model(sd, m):
+    for l in range(NL):
+        w = m['layers'][l]; base_l = LBASE + l*LSTRIDE
+        preload(sd, base_l+OFF['rms_att'], w['rms_att'])
+        preload(sd, base_l+OFF['wq'], rows(w['wq'], 0, H*HS, D))
+        preload(sd, base_l+OFF['wk'], rows(w['wk'], 0, KH*HS, D))
+        preload(sd, base_l+OFF['wv'], rows(w['wv'], 0, KH*HS, D))
+        preload(sd, base_l+OFF['wo'], rows(w['wo'], 0, D, H*HS))
+        preload(sd, base_l+OFF['rms_ffn'], w['rms_ffn'])
+        w1 = w['w1'] + [[0]*D for _ in range(192-HID)]
+        w3 = w['w3'] + [[0]*D for _ in range(192-HID)]
+        preload(sd, base_l+OFF['w1'], rows(w1, 0, 192, D))
+        preload(sd, base_l+OFF['w3'], rows(w3, 0, 192, D))
+        for c in range(3):
+            blk = [[(w['w2'][r][c*64+k] if c*64+k < HID else 0) for k in range(D)] for r in range(D)]
+            preload(sd, base_l+OFF['w2'] + c*0x1000, rows(blk, 0, D, D))
+    preload(sd, A_EMB, rows(m['tok_emb'], 0, VOCAB, D))       # [512,64] row-major
+    preload(sd, A_RMSFINAL, m['rms_final'])
+
+
+def drive_shifts(dut, m):
+    key = dict(sw_rms='rms_att', swq='wq', swk='wk', swv='wv', swo='wo',
+               sw_rmsf='rms_ffn', sw1='w1', sw3='w3', sw2='w2')
+    for port, wk in key.items():
+        getattr(dut, port).value = pack([m['layers'][l][wk + '_s'] for l in range(NL)])
+    dut.sw_rmsfinal.value = m['rms_final_s'] & 0xFF
+    dut.sw_emb.value = m['tok_emb_s'] & 0xFF
+
+
+def drive_freq(dut, m):
+    # cos_q15[pos*64 + 16*p +: 16] = m['cos'][pos][p]  (4 values per position)
+    cosv = 0; sinv = 0
+    for pos in range(len(m['cos'])):
+        for p in range(HS//2):
+            cosv |= (m['cos'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
+            sinv |= (m['sin'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
+    dut.cos_q15.value = cosv
+    dut.sin_q15.value = sinv
+
+
+async def run_generation(dut, n_tok):
+    with open(DUMP) as f:
+        m = json.load(f)
+    expected = m['tokens'][1:1+n_tok]            # tokens[0]=1 is the input token
+
+    cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
+    dut.rst_n.value = 0
+    for s in ("start","gen_mode","x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf",
+              "sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
+        getattr(dut, s).value = 0
+    await ClockCycles(dut.clk, 10)
+
+    preload_model(dut.u_sdram, m)
+    drive_shifts(dut, m)
+    drive_freq(dut, m)
+
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 5)
+    dut.gen_mode.value = 1
+    dut.start.value = 1
+    await RisingEdge(dut.clk); dut.start.value = 0
+
+    got = []
+    for i in range(n_tok):
+        await with_timeout(RisingEdge(dut.token_valid), 400_000_000, "ns")
+        got.append(int(dut.token.value))
+        dut._log.info(f"  token {i} : rtl={got[-1]}  expected={expected[i]}")
+    return got, expected
+
+
+@cocotb.test()
+async def test_gen_F2(dut):
+    got, expected = await run_generation(dut, N_TOK)
+    dut._log.info(f"  got={got}  expected={expected}")
+    assert got == expected, f"step F2 token mismatch : got={got} expected={expected}"
+    dut._log.info(f"STEP F2 PASS: autonomous generation loop, first {N_TOK} tokens match oracle.")

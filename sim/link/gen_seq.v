@@ -42,17 +42,19 @@ module gen_seq #(
     parameter VOCAB  = 512,
     parameter NCHUNK = 8,                 // VOCAB/64
     parameter A_RMSFINAL = 23'h060000,    // final rmsnorm weight
-    parameter A_EMB      = 23'h000000     // tok_emb (shared classifier), chunk c @ +c*0x1000
+    parameter A_EMB      = 23'h000000,    // tok_emb (shared classifier), chunk c @ +c*0x1000
+    parameter NPOS  = 17                  // generation length (token loop)
 ) (
     input  wire            clk, rst_n, start,
+    input  wire            gen_mode,      // 0 = single-shot (external x_in), 1 = autonomous generation
     input  wire [W*D-1:0]  x_in,          // step-B: external x (bypasses embed)
     input  wire signed [7:0] sx_in,
     input  wire [NL*8-1:0] sw_rms, swq, swk, swv, swo,      // per-layer weight shifts
     input  wire [NL*8-1:0] sw_rmsf, sw1, sw3, sw2,         // (selected by current layer)
     input  wire signed [7:0] sw_rmsfinal, sw_emb,          // lm_head shifts (single, shared)
-    input  wire [5:0]      pos,
-    input  wire [16*(HS/2)-1:0] cos_q15,
-    input  wire [16*(HS/2)-1:0] sin_q15,
+    input  wire [5:0]      pos,           // single-shot mode : fixed position
+    input  wire [NPOS*16*(HS/2)-1:0] cos_q15,  // rope freq_cis, packed per position
+    input  wire [NPOS*16*(HS/2)-1:0] sin_q15,
     input  wire [22:0]     base,
     output wire [7:0]      lk_cmd_data,
     output wire            lk_cmd_wr,
@@ -62,11 +64,13 @@ module gen_seq #(
     output wire            lk_resp_rd,
     output reg  [W*D-1:0]  result,        // XB after the 5 layers (captured before lm_head)
     output reg  signed [7:0] result_sh,
-    output reg  [9:0]      token,         // argmax of the lm_head logits (next token)
+    output reg  [9:0]      token,         // argmax of the lm_head logits (= token_out)
+    output reg             token_valid,   // 1-cycle pulse when a token is emitted (gen mode)
     output reg             done
 );
     localparam KVW  = KH*HS;              // 32
     localparam NREP = H/KH;
+    localparam FW   = 16*(HS/2);          // rope freq_cis width per position (=64)
     localparam NSLOTS = 8;
     localparam SW = 3;
     localparam AW = SW + 6;
@@ -113,7 +117,7 @@ module gen_seq #(
         .out(alu_out), .out_sh(alu_out_sh), .done(alu_done));
 
     reg [7:0] pkt [0:79];
-    reg [9:0] pkt_len, resp_len, idx, rcnt;
+    reg [11:0] pkt_len, resp_len, idx, rcnt;   // MM packet grows to ~1158B at pos=16
     reg [6:0] ldi;
     reg [23:0] bcnt;
 
@@ -128,6 +132,8 @@ module gen_seq #(
     // value contaminates the per-chunk output shift, and W2 cols 172..191 are 0.
     reg [2:0] layer;                         // current transformer layer 0..NL-1
     wire [22:0] base_l = base + LBASE + {layer,16'b0};   // = base + LBASE + layer*0x10000
+    reg [9:0] cur_tok;                       // current token fed to EMBED (gen mode)
+    reg [5:0] pos_reg;                       // effective position (internal counter in gen mode)
     // per-layer weight shift selected by the current layer
     wire signed [7:0] sw_rms_l  = $signed(sw_rms [layer*8 +: 8]);
     wire signed [7:0] swq_l     = $signed(swq    [layer*8 +: 8]);
@@ -145,7 +151,7 @@ module gen_seq #(
     // phases : attention (FN..WO), FFN (FN2, W1, W3, SS, W2), lm_head (FNF, LM)
     localparam [3:0] PH_FN=0, PH_WQ=1, PH_WK=2, PH_WV=3, PH_MM=4, PH_WO=5,
                      PH_FN2=6, PH_FW1=7, PH_FW3=8, PH_SS=9, PH_FW2=10,
-                     PH_FNF=11, PH_LM=12;
+                     PH_FNF=11, PH_LM=12, PH_EE=13;
     reg [3:0] phase;
     reg [3:0] src_slot, dst_slot;
     reg [7:0] Nfq;                          // FQ output count for current phase
@@ -183,14 +189,18 @@ module gen_seq #(
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0;
             alu_start<=0; fc<=0; in_ffn<=0; layer<=0; token<=0;
+            cur_tok<=10'd1; pos_reg<=6'd0; token_valid<=1'b0;
         end else begin
-            tx_send<=0; done<=0; vwe<=0; alu_start<=0;
+            tx_send<=0; done<=0; vwe<=0; alu_start<=0; token_valid<=1'b0;
             if (vwe) vfile[vaddr] <= vdin;
 
             case (st)
                 // load external x into vfile[XB], then start the attention block
                 IDLE: if (start) begin sx0<=sx_in; sxn<=sx_in; sxb<=sx_in;
-                        phase<=PH_FN; fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0; st<=LOADX; end
+                        fc<=0; in_ffn<=0; layer<=0; bcnt<=0; ldi<=0; cur_tok<=10'd1;
+                        if (gen_mode) begin phase<=PH_EE; pos_reg<=6'd0; st<=BWAIT; end  // autonomous : embed first
+                        else          begin phase<=PH_FN; pos_reg<=pos;   st<=LOADX; end // single-shot : external x
+                    end
                 LOADX: begin vaddr<=vidx(SB_XB, ldi[5:0]); vdin<=x_in[ldi*W +: W]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; st<=BWAIT; end else ldi<=ldi+1; end
                 BWAIT: if (bcnt==BOOT) st<=BUILD; else bcnt<=bcnt+1;
@@ -215,9 +225,9 @@ module gen_seq #(
                             pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Vc; Nfq<=KH*HS; end
                         PH_MM: begin
                             pkt[0]<="M";pkt[1]<="M";pkt[2]<=sQ;pkt[3]<=sKref;pkt[4]<=sVref;
-                            pkt[5]<=({2'd0,pos}+8'd1);
+                            pkt[5]<=({2'd0,pos_reg}+8'd1);
                             // Q from vfile[Q], then K/V streamed from kvmem
-                            pkt_len<=6+D+2*(({2'd0,pos}+10'd1)*KVW); resp_len<=3+D;
+                            pkt_len<=6+D+2*(({2'd0,pos_reg}+12'd1)*KVW); resp_len<=3+D;
                             src_slot<=SB_Q; end
                         PH_WO: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo_l;
@@ -251,6 +261,9 @@ module gen_seq #(
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw_emb;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D[7:0]; end
+                        PH_EE: begin   // embedding lookup : EE(cur_tok) -> XB (resp 'E''K' x[64])
+                            pkt[0]<="E";pkt[1]<="E";pkt[2]<=cur_tok[7:0];pkt[3]<={6'd0,cur_tok[9:8]};
+                            pkt_len<=4; resp_len<=66; src_slot<=SB_XB; dst_slot<=SB_XB; Nfq<=D[7:0]; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
                             waddr = base_l + OFF_W2 + {fc,12'b0};
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2_l;
@@ -283,7 +296,7 @@ module gen_seq #(
                         idx<=idx+1;
                         if (phase==PH_MM && idx>=(6+D)) begin
                             if (mmo==KVW-1) begin mmo<=0;
-                                if (mmp==pos) begin mmp<=0; mmv<=1'b1; end else mmp<=mmp+1;
+                                if (mmp==pos_reg) begin mmp<=0; mmv<=1'b1; end else mmp<=mmp+1;
                             end else mmo<=mmo+1;
                         end
                         st<=E_SET;
@@ -299,6 +312,7 @@ module gen_seq #(
                                                                   begin vaddr<=vidx(dst_slot, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt[5:0]-6); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
+                    else if (phase==PH_EE && rcnt>=2 && rcnt<2+D) begin vaddr<=vidx(SB_XB, rcnt[5:0]-2); vdin<=rx_data; vwe<=1'b1; end
                     // lm_head chunk logits go to the separate logits[] array (not vfile)
                     if (phase==PH_LM && rcnt>=3 && rcnt<3+D) logits[lmchunk*64 + (rcnt-3)] <= $signed(rx_data);
                     case (phase)
@@ -334,6 +348,7 @@ module gen_seq #(
                                     alu_aslot<=SB_Vc; alu_bslot<=SB_Kc; alu_dslot<=SB_ATT;
                                     alu_op<=1'b0; alu_sa<=ssgc; alu_sb<=s3c; alu_next<=2'd0;
                                     ldi<=0; st<=ALD_A; end
+                            PH_EE:  begin sxb<=sw_emb; phase<=PH_FN; st<=BUILD; end   // embed done -> attention
                             PH_FNF: begin phase<=PH_LM; lmchunk<=0; st<=BUILD; end
                             PH_LM:  if (lmchunk==NCHUNK-1) st<=AMAX_INIT;   // all chunks done -> argmax
                                     else begin lmchunk<=lmchunk+1; st<=BUILD; end
@@ -360,7 +375,7 @@ module gen_seq #(
                         for (p=0;p<HS/2;p=p+1) begin
                             xr = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*p)]);
                             xi = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*p + 1)]);
-                            cq = $signed(cos_q15[16*p +: 16]); sq = $signed(sin_q15[16*p +: 16]);
+                            cq = $signed(cos_q15[pos_reg*FW + 16*p +: 16]); sq = $signed(sin_q15[pos_reg*FW + 16*p +: 16]);
                             nr = (xr*cq - xi*sq + 32'sd16384) >>> 15;
                             ni = (xr*sq + xi*cq + 32'sd16384) >>> 15;
                             rh[2*p]   <= clip8(nr); rh[2*p+1] <= clip8(ni);
@@ -381,7 +396,7 @@ module gen_seq #(
                         for (p=0;p<HS/2;p=p+1) begin
                             xr = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*p)]);
                             xi = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*p + 1)]);
-                            cq = $signed(cos_q15[16*p +: 16]); sq = $signed(sin_q15[16*p +: 16]);
+                            cq = $signed(cos_q15[pos_reg*FW + 16*p +: 16]); sq = $signed(sin_q15[pos_reg*FW + 16*p +: 16]);
                             nr = (xr*cq - xi*sq + 32'sd16384) >>> 15;
                             ni = (xr*sq + xi*cq + 32'sd16384) >>> 15;
                             rh[2*p]   <= clip8(nr); rh[2*p+1] <= clip8(ni);
@@ -398,10 +413,10 @@ module gen_seq #(
 
                 // copy roped Kc / Vc into kvmem[pos], store shifts
                 KVWR: begin
-                    kmem[layer*TMAX*KVW + pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Kc, ldi[5:0])]);
-                    vmem[layer*TMAX*KVW + pos*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Vc, ldi[5:0])]);
+                    kmem[layer*TMAX*KVW + pos_reg*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Kc, ldi[5:0])]);
+                    vmem[layer*TMAX*KVW + pos_reg*KVW + ldi[5:0]] <= $signed(vfile[vidx(SB_Vc, ldi[5:0])]);
                     if (ldi==KVW-1) begin
-                        ksh[layer*TMAX + pos]<=sK; vsh[layer*TMAX + pos]<=sV;
+                        ksh[layer*TMAX + pos_reg]<=sK; vsh[layer*TMAX + pos_reg]<=sV;
                         sKref<=-8'sd128; sVref<=-8'sd128; scan_i<=0; st<=SCAN;
                     end else ldi<=ldi+1;
                 end
@@ -409,7 +424,7 @@ module gen_seq #(
                 SCAN: begin
                     if (ksh[layer*TMAX + scan_i] > sKref) sKref<=ksh[layer*TMAX + scan_i];
                     if (vsh[layer*TMAX + scan_i] > sVref) sVref<=vsh[layer*TMAX + scan_i];
-                    if (scan_i==pos) begin mmp<=0; mmo<=0; mmv<=1'b0; phase<=PH_MM; st<=BUILD; end
+                    if (scan_i==pos_reg) begin mmp<=0; mmo<=0; mmv<=1'b0; phase<=PH_MM; st<=BUILD; end
                     else scan_i<=scan_i+1;
                 end
 
@@ -475,7 +490,17 @@ module gen_seq #(
                             v = $signed(logits[amax_i]) >>> (sref_lm - csh[amax_i[9:6]]);
                             if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
                         end
-                        if (amax_i==VOCAB-1) begin token <= best_idx; done <= 1; st <= IDLE; end
+                        if (amax_i==VOCAB-1) begin
+                            token <= best_idx;
+                            if (gen_mode) begin
+                                token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
+                                if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
+                                else begin  // next token : embed again, KV cache persists
+                                    pos_reg<=pos_reg+1; layer<=0; in_ffn<=1'b0; fc<=2'd0;
+                                    phase<=PH_EE; st<=BUILD;
+                                end
+                            end else begin done<=1; st<=IDLE; end
+                        end
                         else amax_i <= amax_i + 1;
                     end
                 end

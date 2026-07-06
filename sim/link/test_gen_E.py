@@ -136,7 +136,7 @@ def lmhead_argmax(x_i8, rmsfinal_i8, sw_rmsfinal, tok_emb_i8, s_emb, lut):
 async def test_gen_E(dut):
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0; dut.start.value = 0
-    for s in ("x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf","sw1","sw3","sw2",
+    for s in ("gen_mode","x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf","sw1","sw3","sw2",
               "sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
