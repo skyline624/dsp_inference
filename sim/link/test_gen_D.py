@@ -95,7 +95,7 @@ async def test_gen_D(dut):
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0; dut.start.value = 0
     for s in ("x_in","sx_in","sw_rms","swq","swk","swv","swo",
-              "sw_rmsf","sw1","sw3","sw2","pos","cos_q15","sin_q15"):
+              "sw_rmsf","sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
@@ -104,23 +104,25 @@ async def test_gen_D(dut):
     sx = shift_of(x_f); x_i8 = q_at(x_f, sx)
     L = [make_layer(rng) for _ in range(NL)]
 
-    # shared shift per weight type (all layers), so the static sw_* ports are valid
-    srm = shared_shift([w['rms']   for w in L]); srf = shared_shift([w['rmsff'] for w in L])
-    sq  = shared_shift([w['Wq']    for w in L]); sk  = shared_shift([w['Wk']    for w in L])
-    sv  = shared_shift([w['Wv']    for w in L]); so  = shared_shift([w['Wo']    for w in L])
-    s1  = shared_shift([w['W1']    for w in L]); s3  = shared_shift([w['W3']    for w in L])
-    s2  = shared_shift([w['W2']    for w in L])
-
+    # per-layer, per-type quantization : each layer gets its OWN shift, packed into
+    # the [NL*8-1:0] buses -> exercises the per-layer shift selection in the RTL.
+    sh = {k: [] for k in ('rms','rmsff','wq','wk','wv','wo','w1','w3','w2')}
     sd = dut.u_sdram
     refs = []
     for l in range(NL):
         w = L[l]; base_l = LBASE + l*LSTRIDE
-        rms_i8 = q_at(w['rms'], srm); rmsf_i8 = q_at(w['rmsff'], srf)
-        Wv_i8 = qm_at(w['Wv'], sv); Wo_i8 = qm_at(w['Wo'], so)
-        W1_i8 = qm_at(w['W1'], s1); W3_i8 = qm_at(w['W3'], s3); W2_i8 = qm_at(w['W2'], s2)
+        srm = shift_of(w['rms']);          rms_i8  = q_at(w['rms'],  srm)
+        srf = shift_of(w['rmsff']);        rmsf_i8 = q_at(w['rmsff'], srf)
+        sq  = shift_of(flat_any(w['Wq'])); Wq_i8 = qm_at(w['Wq'], sq)
+        sk  = shift_of(flat_any(w['Wk'])); Wk_i8 = qm_at(w['Wk'], sk)
+        sv  = shift_of(flat_any(w['Wv'])); Wv_i8 = qm_at(w['Wv'], sv)
+        so  = shift_of(flat_any(w['Wo'])); Wo_i8 = qm_at(w['Wo'], so)
+        s1  = shift_of(flat_any(w['W1'])); W1_i8 = qm_at(w['W1'], s1)
+        s3  = shift_of(flat_any(w['W3'])); W3_i8 = qm_at(w['W3'], s3)
+        s2  = shift_of(flat_any(w['W2'])); W2_i8 = qm_at(w['W2'], s2)
         preload(sd, base_l+OFF['rms'], bytes((v & 0xFF) for v in rms_i8))
-        preload(sd, base_l+OFF['wq'], rowsb(qm_at(w['Wq'], sq), 0, H*HS, D))
-        preload(sd, base_l+OFF['wk'], rowsb(qm_at(w['Wk'], sk), 0, KH*HS, D))
+        preload(sd, base_l+OFF['wq'], rowsb(Wq_i8, 0, H*HS, D))
+        preload(sd, base_l+OFF['wk'], rowsb(Wk_i8, 0, KH*HS, D))
         preload(sd, base_l+OFF['wv'], rowsb(Wv_i8, 0, KH*HS, D))
         preload(sd, base_l+OFF['wo'], rowsb(Wo_i8, 0, D, H*HS))
         preload(sd, base_l+OFF['rmsff'], bytes((v & 0xFF) for v in rmsf_i8))
@@ -129,20 +131,29 @@ async def test_gen_D(dut):
         for c in range(3):
             blk = [[(W2_i8[r][c*64+k] if c*64+k < HID else 0) for k in range(D)] for r in range(D)]
             preload(sd, base_l+OFF['w2'] + c*0x1000, rowsb(blk, 0, D, D))
-        # dequantized weights for the float reference
+        for k, s in (('rms',srm),('rmsff',srf),('wq',sq),('wk',sk),('wv',sv),
+                     ('wo',so),('w1',s1),('w3',s3),('w2',s2)):
+            sh[k].append(s)
         refs.append(dict(rms=deq(rms_i8, srm), rmsff=deq(rmsf_i8, srf),
                          Wv=deqm(Wv_i8, sv), Wo=deqm(Wo_i8, so),
                          W1=deqm(W1_i8, s1), W3=deqm(W3_i8, s3), W2=deqm(W2_i8, s2)))
 
+    # gen_seq now always runs the lm_head after the 5 layers ; this gate checks the
+    # 5-layer x (captured in `result` BEFORE the head) and ignores `token`. Preload
+    # zeros for rms_final / tok_emb so the head runs cleanly (no X).
+    preload(sd, 0x060000, bytes(D))
+    preload(sd, 0x000000, bytes(512*D))
+
+    def pack(vals): return sum((v & 0xFF) << (i*8) for i, v in enumerate(vals))
     cos = [1.0]*(HS//2); sin = [0.0]*(HS//2)   # pos=0 : rope identity
 
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 5)
     dut.x_in.value = vint([v & 0xFF for v in x_i8]); dut.sx_in.value = sx & 0xFF
-    dut.sw_rms.value = srm & 0xFF; dut.swq.value = sq & 0xFF; dut.swk.value = sk & 0xFF
-    dut.swv.value = sv & 0xFF; dut.swo.value = so & 0xFF
-    dut.sw_rmsf.value = srf & 0xFF
-    dut.sw1.value = s1 & 0xFF; dut.sw3.value = s3 & 0xFF; dut.sw2.value = s2 & 0xFF
+    dut.sw_rms.value = pack(sh['rms']); dut.swq.value = pack(sh['wq']); dut.swk.value = pack(sh['wk'])
+    dut.swv.value = pack(sh['wv']); dut.swo.value = pack(sh['wo'])
+    dut.sw_rmsf.value = pack(sh['rmsff'])
+    dut.sw1.value = pack(sh['w1']); dut.sw3.value = pack(sh['w3']); dut.sw2.value = pack(sh['w2'])
     dut.pos.value = 0
     dut.cos_q15.value = vint(b"".join(int.to_bytes(int(max(-32768,min(32767,round(c*32768.0))))&0xFFFF,2,"little") for c in cos))
     dut.sin_q15.value = vint(b"".join(int.to_bytes(int(max(-32768,min(32767,round(s*32768.0))))&0xFFFF,2,"little") for s in sin))

@@ -37,13 +37,19 @@ module gen_seq #(
     parameter OFF_RMSFF = 23'h003100,
     parameter OFF_W1    = 23'h003200,     // W1 [HID,64], chunk c @ +c*0x1000
     parameter OFF_W3    = 23'h006200,     // W3 [HID,64], chunk c @ +c*0x1000
-    parameter OFF_W2    = 23'h009200      // W2 chunk c = [64,64] @ +c*0x1000
+    parameter OFF_W2    = 23'h009200,     // W2 chunk c = [64,64] @ +c*0x1000
+    // lm_head (after the 5 layers) : fixed addresses, not per-layer
+    parameter VOCAB  = 512,
+    parameter NCHUNK = 8,                 // VOCAB/64
+    parameter A_RMSFINAL = 23'h060000,    // final rmsnorm weight
+    parameter A_EMB      = 23'h000000     // tok_emb (shared classifier), chunk c @ +c*0x1000
 ) (
     input  wire            clk, rst_n, start,
     input  wire [W*D-1:0]  x_in,          // step-B: external x (bypasses embed)
     input  wire signed [7:0] sx_in,
-    input  wire signed [7:0] sw_rms, swq, swk, swv, swo,
-    input  wire signed [7:0] sw_rmsf, sw1, sw3, sw2,   // ffn weight shifts
+    input  wire [NL*8-1:0] sw_rms, swq, swk, swv, swo,      // per-layer weight shifts
+    input  wire [NL*8-1:0] sw_rmsf, sw1, sw3, sw2,         // (selected by current layer)
+    input  wire signed [7:0] sw_rmsfinal, sw_emb,          // lm_head shifts (single, shared)
     input  wire [5:0]      pos,
     input  wire [16*(HS/2)-1:0] cos_q15,
     input  wire [16*(HS/2)-1:0] sin_q15,
@@ -54,8 +60,9 @@ module gen_seq #(
     input  wire [7:0]      lk_resp_data,
     input  wire            lk_resp_empty,
     output wire            lk_resp_rd,
-    output reg  [W*D-1:0]  result,        // XB after residual (x + attn_out)
+    output reg  [W*D-1:0]  result,        // XB after the 5 layers (captured before lm_head)
     output reg  signed [7:0] result_sh,
+    output reg  [9:0]      token,         // argmax of the lm_head logits (next token)
     output reg             done
 );
     localparam KVW  = KH*HS;              // 32
@@ -77,6 +84,15 @@ module gen_seq #(
     reg signed [7:0] vmem [0:NL*TMAX*KVW-1];
     reg signed [7:0] ksh  [0:NL*TMAX-1];
     reg signed [7:0] vsh  [0:NL*TMAX-1];
+
+    // ---- lm_head : VOCAB logits (too big for a vfile slot) + per-chunk shift ----
+    reg signed [7:0] logits [0:VOCAB-1];
+    reg signed [7:0] csh [0:NCHUNK-1];
+    reg [3:0] lmchunk;                       // lm_head tok_emb chunk 0..NCHUNK-1
+    reg signed [7:0] sref_lm;                // max chunk shift (argmax re-align)
+    reg signed [31:0] best_val;
+    reg [9:0] amax_i, best_idx;
+    reg [3:0] scan_c;
 
     // ---- ss_link byte adapters ----
     reg  [7:0] tx_data; reg tx_send; wire tx_busy;
@@ -112,20 +128,32 @@ module gen_seq #(
     // value contaminates the per-chunk output shift, and W2 cols 172..191 are 0.
     reg [2:0] layer;                         // current transformer layer 0..NL-1
     wire [22:0] base_l = base + LBASE + {layer,16'b0};   // = base + LBASE + layer*0x10000
+    // per-layer weight shift selected by the current layer
+    wire signed [7:0] sw_rms_l  = $signed(sw_rms [layer*8 +: 8]);
+    wire signed [7:0] swq_l     = $signed(swq    [layer*8 +: 8]);
+    wire signed [7:0] swk_l     = $signed(swk    [layer*8 +: 8]);
+    wire signed [7:0] swv_l     = $signed(swv    [layer*8 +: 8]);
+    wire signed [7:0] swo_l     = $signed(swo    [layer*8 +: 8]);
+    wire signed [7:0] sw_rmsf_l = $signed(sw_rmsf[layer*8 +: 8]);
+    wire signed [7:0] sw1_l     = $signed(sw1    [layer*8 +: 8]);
+    wire signed [7:0] sw3_l     = $signed(sw3    [layer*8 +: 8]);
+    wire signed [7:0] sw2_l     = $signed(sw2    [layer*8 +: 8]);
 
     function signed [7:0] clip8; input signed [31:0] v;
         clip8 = (v > 127) ? 8'sd127 : (v < -128) ? -8'sd128 : v[7:0]; endfunction
 
-    // phases : attention (FN..WO) then FFN (FN2, W1, W3, SS, W2)
+    // phases : attention (FN..WO), FFN (FN2, W1, W3, SS, W2), lm_head (FNF, LM)
     localparam [3:0] PH_FN=0, PH_WQ=1, PH_WK=2, PH_WV=3, PH_MM=4, PH_WO=5,
-                     PH_FN2=6, PH_FW1=7, PH_FW3=8, PH_SS=9, PH_FW2=10;
+                     PH_FN2=6, PH_FW1=7, PH_FW3=8, PH_SS=9, PH_FW2=10,
+                     PH_FNF=11, PH_LM=12;
     reg [3:0] phase;
     reg [3:0] src_slot, dst_slot;
     reg [7:0] Nfq;                          // FQ output count for current phase
 
     localparam IDLE=0, LOADX=1, BWAIT=2, BUILD=3, E_SET=4, E_BUSY=5, E_DONE=6, RECV=7,
                ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13,
-               ALD_A=14, ALD_B=15, ALU_WAIT=16, AST_A=17, FRED_COPY=18;
+               ALD_A=14, ALD_B=15, ALU_WAIT=16, AST_A=17, FRED_COPY=18,
+               AMAX_INIT=19, AMAX=20;
     reg [4:0] st;
 
     // rx one-byte-per-ack handshake
@@ -154,7 +182,7 @@ module gen_seq #(
         if (!rst_n) begin
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0;
-            alu_start<=0; fc<=0; in_ffn<=0; layer<=0;
+            alu_start<=0; fc<=0; in_ffn<=0; layer<=0; token<=0;
         end else begin
             tx_send<=0; done<=0; vwe<=0; alu_start<=0;
             if (vwe) vfile[vaddr] <= vdin;
@@ -170,19 +198,19 @@ module gen_seq #(
                 BUILD: begin
                     case (phase)
                         PH_FN: begin
-                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rms;
+                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rms_l;
                             pkt[68]<=a0(base_l+OFF_RMS);pkt[69]<=a1(base_l+OFF_RMS);pkt[70]<=a2(base_l+OFF_RMS);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_WQ: begin
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=H*HS;pkt[3]<=sxn;pkt[4]<=swq;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=H*HS;pkt[3]<=sxn;pkt[4]<=swq_l;
                             pkt[69]<=a0(base_l+OFF_WQ);pkt[70]<=a1(base_l+OFF_WQ);pkt[71]<=a2(base_l+OFF_WQ);
                             pkt_len<=72; resp_len<=3+H*HS; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=H*HS; end
                         PH_WK: begin
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swk;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swk_l;
                             pkt[69]<=a0(base_l+OFF_WK);pkt[70]<=a1(base_l+OFF_WK);pkt[71]<=a2(base_l+OFF_WK);
                             pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=KH*HS; end
                         PH_WV: begin
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swv;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=KH*HS;pkt[3]<=sxn;pkt[4]<=swv_l;
                             pkt[69]<=a0(base_l+OFF_WV);pkt[70]<=a1(base_l+OFF_WV);pkt[71]<=a2(base_l+OFF_WV);
                             pkt_len<=72; resp_len<=3+KH*HS; src_slot<=SB_XN; dst_slot<=SB_Vc; Nfq<=KH*HS; end
                         PH_MM: begin
@@ -192,30 +220,40 @@ module gen_seq #(
                             pkt_len<=6+D+2*(({2'd0,pos}+10'd1)*KVW); resp_len<=3+D;
                             src_slot<=SB_Q; end
                         PH_WO: begin
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo_l;
                             pkt[69]<=a0(base_l+OFF_WO);pkt[70]<=a1(base_l+OFF_WO);pkt[71]<=a2(base_l+OFF_WO);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0]; end
                         // ---- FFN ----
                         PH_FN2: begin  // rmsnorm(XB, rms_ffn) -> XN
-                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf;
+                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf_l;
                             pkt[68]<=a0(base_l+OFF_RMSFF);pkt[69]<=a1(base_l+OFF_RMSFF);pkt[70]<=a2(base_l+OFF_RMSFF);
                             pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
                         PH_FW1: begin  // W1_chunk(XN) -> H1 (SB_Q), N_out=64 (zero-padded)
                             waddr = base_l + OFF_W1 + {fc,12'b0};
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D[7:0]; end
                         PH_FW3: begin  // W3_chunk(XN) -> H3 (SB_Kc)
                             waddr = base_l + OFF_W3 + {fc,12'b0};
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D[7:0]; end
                         PH_SS: begin   // silu(H1) -> SG (SB_Vc)
                             pkt[0]<="S";pkt[1]<="S";pkt[2]<=s1c;
                             pkt_len<=67; resp_len<=70; src_slot<=SB_Q; dst_slot<=SB_Vc; Nfq<=D[7:0]; end
+                        // ---- lm_head ----
+                        PH_FNF: begin  // final rmsnorm(XB, rms_final) -> XN
+                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsfinal;
+                            pkt[68]<=a0(A_RMSFINAL+base);pkt[69]<=a1(A_RMSFINAL+base);pkt[70]<=a2(A_RMSFINAL+base);
+                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
+                        PH_LM: begin   // FQ(XN, tok_emb chunk lmchunk) -> logits chunk
+                            waddr = A_EMB + base + {lmchunk,12'b0};
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw_emb;
+                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
+                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; Nfq<=D[7:0]; end
                         default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
                             waddr = base_l + OFF_W2 + {fc,12'b0};
-                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2;
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2_l;
                             pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D[7:0]; end
                     endcase
@@ -224,10 +262,10 @@ module gen_seq #(
 
                 // stream packet; vector bytes read combinationally from vfile
                 E_SET: begin
-                    if ((phase==PH_FN||phase==PH_FN2) && idx>=4 && idx<4+D)
+                    if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && idx>=4 && idx<4+D)
                                                                     tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
                     else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
-                              phase==PH_FW1||phase==PH_FW3||phase==PH_FW2) && idx>=5 && idx<5+D)
+                              phase==PH_FW1||phase==PH_FW3||phase==PH_FW2||phase==PH_LM) && idx>=5 && idx<5+D)
                                                                     tx_data<=vfile[vidx(src_slot, idx[5:0]-5)];
                     else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
                     else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
@@ -254,13 +292,15 @@ module gen_seq #(
 
                 // stream response; write vector bytes into dst_slot
                 RECV: if (rx_valid) begin
-                    if ((phase==PH_FN||phase==PH_FN2) && rcnt>=11 && rcnt<11+D)
+                    if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && rcnt>=11 && rcnt<11+D)
                                                                   begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
                     else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
                               phase==PH_FW1||phase==PH_FW3||phase==PH_FW2) && rcnt>=3 && rcnt<3+Nfq)
                                                                   begin vaddr<=vidx(dst_slot, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt[5:0]-6); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
+                    // lm_head chunk logits go to the separate logits[] array (not vfile)
+                    if (phase==PH_LM && rcnt>=3 && rcnt<3+D) logits[lmchunk*64 + (rcnt-3)] <= $signed(rx_data);
                     case (phase)
                         PH_FN:  if (rcnt==2) sxn<=$signed(rx_data);
                         PH_WQ:  if (rcnt==2) sQ<=$signed(rx_data);
@@ -273,6 +313,8 @@ module gen_seq #(
                         PH_FW3: if (rcnt==2) s3c<=$signed(rx_data);
                         PH_SS:  if (rcnt==2) ssgc<=$signed(rx_data);
                         PH_FW2: if (rcnt==2) spc<=$signed(rx_data);
+                        PH_FNF: if (rcnt==2) sxn<=$signed(rx_data);
+                        PH_LM:  if (rcnt==2) csh[lmchunk]<=$signed(rx_data);
                     endcase
                     if (rcnt==resp_len-1) begin
                         case (phase)
@@ -292,6 +334,9 @@ module gen_seq #(
                                     alu_aslot<=SB_Vc; alu_bslot<=SB_Kc; alu_dslot<=SB_ATT;
                                     alu_op<=1'b0; alu_sa<=ssgc; alu_sb<=s3c; alu_next<=2'd0;
                                     ldi<=0; st<=ALD_A; end
+                            PH_FNF: begin phase<=PH_LM; lmchunk<=0; st<=BUILD; end
+                            PH_LM:  if (lmchunk==NCHUNK-1) st<=AMAX_INIT;   // all chunks done -> argmax
+                                    else begin lmchunk<=lmchunk+1; st<=BUILD; end
                             default: begin  // PH_FW2 : reduce P into OUTV accumulator
                                     if (fc==2'd0) begin ldi<=0; st<=FRED_COPY; end
                                     else begin alu_aslot<=SB_OUTV; alu_bslot<=SB_P; alu_dslot<=SB_OUTV;
@@ -368,10 +413,10 @@ module gen_seq #(
                     else scan_i<=scan_i+1;
                 end
 
-                // stream XB (x + attn + ffn) to result
+                // capture x-after-5-layers into result (for test_gen_D), then lm_head
                 DONE_ST: begin
                     result[ldi*W +: W] <= vfile[vidx(SB_XB, ldi[5:0])];
-                    if (ldi==D-1) begin result_sh<=sxb; done<=1; st<=IDLE; end
+                    if (ldi==D-1) begin result_sh<=sxb; ldi<=0; phase<=PH_FNF; st<=BUILD; end
                     else ldi<=ldi+1;
                 end
 
@@ -413,6 +458,27 @@ module gen_seq #(
                 FRED_COPY: begin vaddr<=vidx(SB_OUTV, ldi[5:0]); vdin<=vfile[vidx(SB_P, ldi[5:0])]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; sov<=spc; fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
                         else ldi<=ldi+1; end
+
+                // ---- lm_head argmax : sref = max(csh), then running max over VOCAB ----
+                AMAX_INIT: begin
+                    sref_lm <= csh[0]; scan_c <= 1;
+                    best_val <= -32'sd2147483647; best_idx <= 0; amax_i <= 0;
+                    st <= AMAX;
+                end
+                AMAX: begin
+                    if (scan_c < NCHUNK) begin
+                        if (csh[scan_c] > sref_lm) sref_lm <= csh[scan_c];
+                        scan_c <= scan_c + 1;
+                    end else begin
+                        begin: sweep
+                            reg signed [31:0] v;
+                            v = $signed(logits[amax_i]) >>> (sref_lm - csh[amax_i[9:6]]);
+                            if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
+                        end
+                        if (amax_i==VOCAB-1) begin token <= best_idx; done <= 1; st <= IDLE; end
+                        else amax_i <= amax_i + 1;
+                    end
+                end
             endcase
         end
     end
