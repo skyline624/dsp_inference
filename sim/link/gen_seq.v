@@ -30,12 +30,17 @@ module gen_seq #(
     parameter A_WQ  = 23'h101000,
     parameter A_WK  = 23'h102000,
     parameter A_WV  = 23'h103000,
-    parameter A_WO  = 23'h104000
+    parameter A_WO  = 23'h104000,
+    parameter A_RMSFF = 23'h105000,       // ffn rmsnorm weight
+    parameter A_W1  = 23'h106000,         // ffn W1  [HID,64], chunk c @ +c*0x1000
+    parameter A_W3  = 23'h109000,         // ffn W3  [HID,64], chunk c @ +c*0x1000
+    parameter A_W2  = 23'h10C000          // ffn W2  chunk c = [64,64] @ +c*0x1000
 ) (
     input  wire            clk, rst_n, start,
     input  wire [W*D-1:0]  x_in,          // step-B: external x (bypasses embed)
     input  wire signed [7:0] sx_in,
     input  wire signed [7:0] sw_rms, swq, swk, swv, swo,
+    input  wire signed [7:0] sw_rmsf, sw1, sw3, sw2,   // ffn weight shifts
     input  wire [5:0]      pos,
     input  wire [16*(HS/2)-1:0] cos_q15,
     input  wire [16*(HS/2)-1:0] sin_q15,
@@ -55,7 +60,9 @@ module gen_seq #(
     localparam NSLOTS = 8;
     localparam SW = 3;
     localparam AW = SW + 6;
-    localparam [SW-1:0] SB_XB=0, SB_XN=1, SB_Q=2, SB_Kc=3, SB_Vc=4, SB_ATT=5, SB_OUTV=6;
+    localparam [SW-1:0] SB_XB=0, SB_XN=1, SB_Q=2, SB_Kc=3, SB_Vc=4, SB_ATT=5, SB_OUTV=6, SB_P=7;
+    // FFN reuses the attention slots once attention is done : XN=rmsnorm,
+    // H1=Q, H3=Kc, SG=Vc, HG=ATT, W2-accumulator=OUTV, W2-partial=P, residual=XB.
 
     // ---- register file (LUT-RAM) ----
     reg [7:0] vfile [0:NSLOTS*D-1];
@@ -76,25 +83,45 @@ module gen_seq #(
     rx8_link u_rx (.clk(clk), .rst(~rst_n), .data(rx_data), .valid(rx_valid),
                    .rdy(rx_rdy), .i_data(lk_resp_data), .i_empty(lk_resp_empty), .o_rd(lk_resp_rd));
 
+    // ---- serialized elementwise ALU (FFN MUL, W2 reduce ADD, residual ADD) ----
+    reg            alu_start, alu_op;
+    reg  [1:0]     alu_next;                  // 0=MUL->HG, 1=reduce->OUTV, 2=residual->XB
+    reg  [W*D-1:0] alu_a, alu_b; reg signed [7:0] alu_sa, alu_sb;
+    wire [W*D-1:0] alu_out; wire signed [7:0] alu_out_sh; wire alu_done;
+    reg  [SW-1:0]  alu_aslot, alu_bslot, alu_dslot;
+    vec_alu2 #(W, D) u_alu (.clk(clk), .rst_n(rst_n), .start(alu_start), .op(alu_op),
+        .a(alu_a), .sa(alu_sa), .b(alu_b), .sb(alu_sb),
+        .out(alu_out), .out_sh(alu_out_sh), .done(alu_done));
+
     reg [7:0] pkt [0:79];
     reg [9:0] pkt_len, resp_len, idx, rcnt;
     reg [6:0] ldi;
     reg [23:0] bcnt;
 
     reg signed [7:0] sx0, sxn, sQ, sK, sV, sA, sOut;
+    // FFN running/per-chunk shifts + chunk counter
+    reg signed [7:0] sxb, s1c, s3c, ssgc, shc, spc, sov;
+    reg [1:0] fc;                            // ffn hidden chunk 0..2 (64+64+44)
+    reg in_ffn;                              // 0 while attention, 1 during FFN
+    reg [22:0] waddr;                        // blocking temp : chunked weight address
+    // FFN hidden dim HID=172 is chunked 3x64 with W1/W3 rows 172..191 zero-padded
+    // (test preload) so every chunk is a clean 64-wide op : silu(0)=0, no stale
+    // value contaminates the per-chunk output shift, and W2 cols 172..191 are 0.
 
     function signed [7:0] clip8; input signed [31:0] v;
         clip8 = (v > 127) ? 8'sd127 : (v < -128) ? -8'sd128 : v[7:0]; endfunction
 
-    // phases
-    localparam [3:0] PH_FN=0, PH_WQ=1, PH_WK=2, PH_WV=3, PH_MM=4, PH_WO=5;
+    // phases : attention (FN..WO) then FFN (FN2, W1, W3, SS, W2)
+    localparam [3:0] PH_FN=0, PH_WQ=1, PH_WK=2, PH_WV=3, PH_MM=4, PH_WO=5,
+                     PH_FN2=6, PH_FW1=7, PH_FW3=8, PH_SS=9, PH_FW2=10;
     reg [3:0] phase;
     reg [3:0] src_slot, dst_slot;
     reg [7:0] Nfq;                          // FQ output count for current phase
 
     localparam IDLE=0, LOADX=1, BWAIT=2, BUILD=3, E_SET=4, E_BUSY=5, E_DONE=6, RECV=7,
-               ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13;
-    reg [3:0] st;
+               ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13,
+               ALD_A=14, ALD_B=15, ALU_WAIT=16, AST_A=17, FRED_COPY=18;
+    reg [4:0] st;
 
     // rx one-byte-per-ack handshake
     reg rx_ack;
@@ -122,13 +149,15 @@ module gen_seq #(
         if (!rst_n) begin
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
             ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0;
+            alu_start<=0; fc<=0; in_ffn<=0;
         end else begin
-            tx_send<=0; done<=0; vwe<=0;
+            tx_send<=0; done<=0; vwe<=0; alu_start<=0;
             if (vwe) vfile[vaddr] <= vdin;
 
             case (st)
                 // load external x into vfile[XB], then start the attention block
-                IDLE: if (start) begin sx0<=sx_in; sxn<=sx_in; phase<=PH_FN; bcnt<=0; ldi<=0; st<=LOADX; end
+                IDLE: if (start) begin sx0<=sx_in; sxn<=sx_in; sxb<=sx_in;
+                        phase<=PH_FN; fc<=0; in_ffn<=0; bcnt<=0; ldi<=0; st<=LOADX; end
                 LOADX: begin vaddr<=vidx(SB_XB, ldi[5:0]); vdin<=x_in[ldi*W +: W]; vwe<=1'b1;
                         if (ldi==D-1) begin ldi<=0; st<=BWAIT; end else ldi<=ldi+1; end
                 BWAIT: if (bcnt==BOOT) st<=BUILD; else bcnt<=bcnt+1;
@@ -157,19 +186,45 @@ module gen_seq #(
                             // Q from vfile[Q], then K/V streamed from kvmem
                             pkt_len<=6+D+2*(({2'd0,pos}+10'd1)*KVW); resp_len<=3+D;
                             src_slot<=SB_Q; end
-                        default: begin // PH_WO
+                        PH_WO: begin
                             pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sA;pkt[4]<=swo;
                             pkt[69]<=a0(A_WO+base);pkt[70]<=a1(A_WO+base);pkt[71]<=a2(A_WO+base);
                             pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_OUTV; Nfq<=D[7:0]; end
+                        // ---- FFN ----
+                        PH_FN2: begin  // rmsnorm(XB, rms_ffn) -> XN
+                            pkt[0]<="F";pkt[1]<="N";pkt[2]<=sxb;pkt[3]<=sw_rmsf;
+                            pkt[68]<=a0(A_RMSFF+base);pkt[69]<=a1(A_RMSFF+base);pkt[70]<=a2(A_RMSFF+base);
+                            pkt_len<=71; resp_len<=75; src_slot<=SB_XB; dst_slot<=SB_XN; Nfq<=D[7:0]; end
+                        PH_FW1: begin  // W1_chunk(XN) -> H1 (SB_Q), N_out=64 (zero-padded)
+                            waddr = A_W1 + base + {fc,12'b0};
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw1;
+                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
+                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Q; Nfq<=D[7:0]; end
+                        PH_FW3: begin  // W3_chunk(XN) -> H3 (SB_Kc)
+                            waddr = A_W3 + base + {fc,12'b0};
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=sxn;pkt[4]<=sw3;
+                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
+                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_XN; dst_slot<=SB_Kc; Nfq<=D[7:0]; end
+                        PH_SS: begin   // silu(H1) -> SG (SB_Vc)
+                            pkt[0]<="S";pkt[1]<="S";pkt[2]<=s1c;
+                            pkt_len<=67; resp_len<=70; src_slot<=SB_Q; dst_slot<=SB_Vc; Nfq<=D[7:0]; end
+                        default: begin // PH_FW2 : W2_chunk(HG) -> P (SB_P), N_out=64
+                            waddr = A_W2 + base + {fc,12'b0};
+                            pkt[0]<="F";pkt[1]<="Q";pkt[2]<=D[7:0];pkt[3]<=shc;pkt[4]<=sw2;
+                            pkt[69]<=a0(waddr);pkt[70]<=a1(waddr);pkt[71]<=a2(waddr);
+                            pkt_len<=72; resp_len<=3+D; src_slot<=SB_ATT; dst_slot<=SB_P; Nfq<=D[7:0]; end
                     endcase
                     idx<=0; st<=E_SET;
                 end
 
                 // stream packet; vector bytes read combinationally from vfile
                 E_SET: begin
-                    if (phase==PH_FN && idx>=4 && idx<4+D)          tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
-                    else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO) && idx>=5 && idx<5+D)
+                    if ((phase==PH_FN||phase==PH_FN2) && idx>=4 && idx<4+D)
+                                                                    tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
+                    else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
+                              phase==PH_FW1||phase==PH_FW3||phase==PH_FW2) && idx>=5 && idx<5+D)
                                                                     tx_data<=vfile[vidx(src_slot, idx[5:0]-5)];
+                    else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
                     else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
                     else if (phase==PH_MM && idx>=(6+D)) begin
                         if (!mmv) tx_data <= clip8( $signed(kmem[mmp*KVW + mmo]) >>> (sKref - ksh[mmp]) );
@@ -194,26 +249,50 @@ module gen_seq #(
 
                 // stream response; write vector bytes into dst_slot
                 RECV: if (rx_valid) begin
-                    if (phase==PH_FN && rcnt>=11 && rcnt<11+D)   begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
-                    else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO) && rcnt>=3 && rcnt<3+Nfq)
+                    if ((phase==PH_FN||phase==PH_FN2) && rcnt>=11 && rcnt<11+D)
+                                                                  begin vaddr<=vidx(SB_XN, rcnt[5:0]-11); vdin<=rx_data; vwe<=1'b1; end
+                    else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
+                              phase==PH_FW1||phase==PH_FW3||phase==PH_FW2) && rcnt>=3 && rcnt<3+Nfq)
                                                                   begin vaddr<=vidx(dst_slot, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
+                    else if (phase==PH_SS && rcnt>=6 && rcnt<6+D) begin vaddr<=vidx(dst_slot, rcnt[5:0]-6); vdin<=rx_data; vwe<=1'b1; end
                     else if (phase==PH_MM && rcnt>=3 && rcnt<3+D) begin vaddr<=vidx(SB_ATT, rcnt[5:0]-3); vdin<=rx_data; vwe<=1'b1; end
                     case (phase)
-                        PH_FN: if (rcnt==2) sxn<=$signed(rx_data);
-                        PH_WQ: if (rcnt==2) sQ<=$signed(rx_data);
-                        PH_WK: if (rcnt==2) sK<=$signed(rx_data);
-                        PH_WV: if (rcnt==2) sV<=$signed(rx_data);
-                        PH_MM: if (rcnt==2) sA<=$signed(rx_data);
-                        PH_WO: if (rcnt==2) sOut<=$signed(rx_data);
+                        PH_FN:  if (rcnt==2) sxn<=$signed(rx_data);
+                        PH_WQ:  if (rcnt==2) sQ<=$signed(rx_data);
+                        PH_WK:  if (rcnt==2) sK<=$signed(rx_data);
+                        PH_WV:  if (rcnt==2) sV<=$signed(rx_data);
+                        PH_MM:  if (rcnt==2) sA<=$signed(rx_data);
+                        PH_WO:  if (rcnt==2) sOut<=$signed(rx_data);
+                        PH_FN2: if (rcnt==2) sxn<=$signed(rx_data);
+                        PH_FW1: if (rcnt==2) s1c<=$signed(rx_data);
+                        PH_FW3: if (rcnt==2) s3c<=$signed(rx_data);
+                        PH_SS:  if (rcnt==2) ssgc<=$signed(rx_data);
+                        PH_FW2: if (rcnt==2) spc<=$signed(rx_data);
                     endcase
                     if (rcnt==resp_len-1) begin
                         case (phase)
-                            PH_FN: begin phase<=PH_WQ; st<=BUILD; end
-                            PH_WQ: begin phase<=PH_WK; st<=BUILD; end
-                            PH_WK: begin phase<=PH_WV; st<=BUILD; end
-                            PH_WV: begin hidx<=0; rope_slot<=SB_Q; st<=ROPEQ; end
-                            PH_MM: begin phase<=PH_WO; st<=BUILD; end
-                            default: begin ldi<=0; st<=RESID; end // PH_WO -> residual
+                            PH_FN:  begin phase<=PH_WQ; st<=BUILD; end
+                            PH_WQ:  begin phase<=PH_WK; st<=BUILD; end
+                            PH_WK:  begin phase<=PH_WV; st<=BUILD; end
+                            PH_WV:  begin hidx<=0; rope_slot<=SB_Q; st<=ROPEQ; end
+                            PH_MM:  begin phase<=PH_WO; st<=BUILD; end
+                            PH_WO:  begin  // attention residual : XB = XB + OUTV (requantizing add)
+                                    alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
+                                    alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sOut; alu_next<=2'd2;
+                                    ldi<=0; st<=ALD_A; end
+                            PH_FN2: begin phase<=PH_FW1; fc<=0; st<=BUILD; end
+                            PH_FW1: begin phase<=PH_FW3; st<=BUILD; end
+                            PH_FW3: begin phase<=PH_SS; st<=BUILD; end
+                            PH_SS:  begin  // MUL : SG(Vc) * H3(Kc) -> HG(ATT)
+                                    alu_aslot<=SB_Vc; alu_bslot<=SB_Kc; alu_dslot<=SB_ATT;
+                                    alu_op<=1'b0; alu_sa<=ssgc; alu_sb<=s3c; alu_next<=2'd0;
+                                    ldi<=0; st<=ALD_A; end
+                            default: begin  // PH_FW2 : reduce P into OUTV accumulator
+                                    if (fc==2'd0) begin ldi<=0; st<=FRED_COPY; end
+                                    else begin alu_aslot<=SB_OUTV; alu_bslot<=SB_P; alu_dslot<=SB_OUTV;
+                                               alu_op<=1'b1; alu_sa<=sov; alu_sb<=spc; alu_next<=2'd1;
+                                               ldi<=0; st<=ALD_A; end
+                            end
                         endcase
                     end else rcnt<=rcnt+1;
                 end
@@ -284,35 +363,47 @@ module gen_seq #(
                     else scan_i<=scan_i+1;
                 end
 
-                // residual : XB = XB + OUTV  (needs an add; reuse vec via a serial int add)
-                // XB and OUTV share shift sx0 (XB) and sOut (OUTV=Wo output). We align
-                // to the smaller shift and add. sOut = sA+swo add-shift = the FQ shift.
-                // residual XB = XB + OUTV, both aligned to the SMALLER shift (= more
-                // fractional bits). shift diffs are non-negative, cast to unsigned so
-                // <<< never gets a negative (undefined -> X) count.
-                RESID: begin
-                    begin: res
-                        reg signed [7:0] xbv, ov;
-                        reg [7:0] dx, dov;
-                        reg signed [31:0] a32, b32, sum;
-                        xbv = $signed(vfile[vidx(SB_XB, ldi[5:0])]);
-                        ov  = $signed(vfile[vidx(SB_OUTV, ldi[5:0])]);
-                        if (sx0 <= sOut) begin dx = 8'd0;          dov = sOut - sx0; end
-                        else             begin dx = sx0 - sOut;    dov = 8'd0;       end
-                        a32 = $signed({{24{xbv[7]}}, xbv}) <<< dx;
-                        b32 = $signed({{24{ov[7]}},  ov })  <<< dov;
-                        sum = a32 + b32;
-                        vaddr<=vidx(SB_XB, ldi[5:0]); vdin<=clip8(sum); vwe<=1'b1;
-                    end
-                    if (ldi==D-1) begin ldi<=0; st<=DONE_ST; end else ldi<=ldi+1;
-                end
-
-                // stream XB (x + attn) to result
+                // stream XB (x + attn + ffn) to result
                 DONE_ST: begin
                     result[ldi*W +: W] <= vfile[vidx(SB_XB, ldi[5:0])];
-                    if (ldi==D-1) begin result_sh<=(sx0<sOut)?sx0:sOut; done<=1; st<=IDLE; end
+                    if (ldi==D-1) begin result_sh<=sxb; done<=1; st<=IDLE; end
                     else ldi<=ldi+1;
                 end
+
+                // ---- serialized ALU sequence (MUL for SwiGLU, ADD for W2 reduce) ----
+                // load alu_a (D bytes, combinational vfile read), then alu_b, pulse start.
+                ALD_A: begin alu_a[ldi*W +: W] <= vfile[vidx(alu_aslot, ldi[5:0])];
+                        if (ldi==D-1) begin ldi<=0; st<=ALD_B; end else ldi<=ldi+1; end
+                ALD_B: begin alu_b[ldi*W +: W] <= vfile[vidx(alu_bslot, ldi[5:0])];
+                        if (ldi==D-1) begin ldi<=0; alu_start<=1'b1; st<=ALU_WAIT; end else ldi<=ldi+1; end
+                ALU_WAIT: if (alu_done) begin
+                        case (alu_next)
+                            2'd0: shc<=alu_out_sh;    // MUL -> HG shift
+                            2'd1: sov<=alu_out_sh;    // reduce -> accumulator shift
+                            default: sxb<=alu_out_sh; // residual -> new running XB shift
+                        endcase
+                        ldi<=0; st<=AST_A;
+                    end
+                // serial-store alu_out into alu_dslot, then dispatch by alu_next
+                AST_A: begin vaddr<=vidx(alu_dslot, ldi[5:0]); vdin<=alu_out[ldi*W +: W]; vwe<=1'b1;
+                        if (ldi==D-1) begin ldi<=0;
+                            case (alu_next)
+                                2'd0: begin phase<=PH_FW2; st<=BUILD; end               // MUL done -> W2
+                                2'd1: if (fc==2'd2) begin                               // last reduce -> FFN residual
+                                          alu_aslot<=SB_XB; alu_bslot<=SB_OUTV; alu_dslot<=SB_XB;
+                                          alu_op<=1'b1; alu_sa<=sxb; alu_sb<=sov; alu_next<=2'd2;
+                                          ldi<=0; st<=ALD_A;
+                                      end else begin fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
+                                default: begin  // residual done : chain attn->FFN, or finish
+                                          if (!in_ffn) begin in_ffn<=1'b1; phase<=PH_FN2; st<=BUILD; end
+                                          else st<=DONE_ST;
+                                      end
+                            endcase
+                        end else ldi<=ldi+1; end
+                // fc==0 : the first W2 partial simply seeds the accumulator (no add)
+                FRED_COPY: begin vaddr<=vidx(SB_OUTV, ldi[5:0]); vdin<=vfile[vidx(SB_P, ldi[5:0])]; vwe<=1'b1;
+                        if (ldi==D-1) begin ldi<=0; sov<=spc; fc<=fc+1; phase<=PH_FW1; st<=BUILD; end
+                        else ldi<=ldi+1; end
             endcase
         end
     end
