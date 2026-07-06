@@ -158,6 +158,21 @@ Compteur `layer 0..4`, `base = 0x010000 + layer*0x10000` (déjà le port `base`)
 - **Gate D** : `test_gen_D` — 5 couches à pos=0, x_after_5layers vs oracle Python.
 
 ### Étape E — lm_head + argmax en style `vfile`
+> **État** : 🟢 **VERTE** (commit `c738122`). `test_gen_E` PASS — token exact
+> (`token_rtl=423 == token_ref=423`, ref rang 0). `test_gen_D` non-reg reste VERT
+> (16.0 %). **+ résolu le point ouvert « shifts par-couche »** : les 9 ports de shift
+> sont désormais des bus `[NL*8-1:0]` sélectionnés par `layer` (le vrai modèle a des
+> shifts différents par couche).
+> **RTL** : après les 5 couches, `gen_seq` capture `result`=x-après-5-couches (pour
+> D) **puis** lance `PH_FNF` (FN rms_final @0x060000) → `PH_LM` (8× FQ tok_emb chunk
+> @c*0x1000) → `AMAX` (re-align entier + running-max → `token[9:0]`). logits dans un
+> tableau séparé (512 > 1 slot). Nouveaux ports `sw_rmsfinal`/`sw_emb`/`token`.
+> **⚠ Piège validé (pour F)** : l'argmax sur poids synthétiques a un gap minuscule
+> (2-3). La référence DOIT répliquer le rmsnorm LUT du nœud **bit-à-bit**
+> (`rmsnorm_op.v` : LUT rsqrt + parité + `apply_shift`, **`shift_out=shift_w`** pas
+> dynamique) — un rmsnorm float fait basculer le mauvais argmax. Le FQ est déjà
+> bit-exact (Phase 5c). `test_gen_E` compare sur le x DU RTL → match exact.
+
 Porter `lmhead_seq` (Phase 5c, validé) :
 1. `PH_FN_FINAL` : FN(XB, rms_final @ 0x060000) → XN
 2. `PH_LMHEAD` : 8× FQ(XN, tok_emb chunk c @ 0x000000 + c*0x1000) → `vfile[LG]`,
