@@ -71,14 +71,8 @@ def drive_shifts(dut, m):
     dut.sw_emb.value = m['tok_emb_s'] & 0xFF
 
 
-def drive_freq(dut, m):
-    cosv = 0; sinv = 0
-    for pos in range(len(m['cos'])):
-        for p in range(HS//2):
-            cosv |= (m['cos'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
-            sinv |= (m['sin'][pos][p] & 0xFFFF) << (pos*64 + 16*p)
-    dut.cos_q15.value = cosv
-    dut.sin_q15.value = sinv
+# drive_freq removed : rope freq_cis now baked into gen_seq's cos_rom/sin_rom BSRAM
+# (src/freq_cis_{cos,sin}.hex), no longer driven through cos_q15/sin_q15 ports.
 
 
 @cocotb.test()
@@ -90,13 +84,12 @@ async def test_gen_F(dut):
     cocotb.start_soon(Clock(dut.clk, 37, units="ns").start())
     dut.rst_n.value = 0
     for s in ("start","gen_mode","x_in","sx_in","sw_rms","swq","swk","swv","swo","sw_rmsf",
-              "sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos","cos_q15","sin_q15"):
+              "sw1","sw3","sw2","sw_rmsfinal","sw_emb","pos"):
         getattr(dut, s).value = 0
     await ClockCycles(dut.clk, 10)
 
     preload_model(dut.u_sdram, m)
     drive_shifts(dut, m)
-    drive_freq(dut, m)
 
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 5)

@@ -53,8 +53,6 @@ module gen_seq #(
     input  wire [NL*8-1:0] sw_rmsf, sw1, sw3, sw2,         // (selected by current layer)
     input  wire signed [7:0] sw_rmsfinal, sw_emb,          // lm_head shifts (single, shared)
     input  wire [5:0]      pos,           // single-shot mode : fixed position
-    input  wire [NPOS*16*(HS/2)-1:0] cos_q15,  // rope freq_cis, packed per position
-    input  wire [NPOS*16*(HS/2)-1:0] sin_q15,
     input  wire [22:0]     base,
     output wire [7:0]      lk_cmd_data,
     output wire            lk_cmd_wr,
@@ -70,10 +68,13 @@ module gen_seq #(
 );
     localparam KVW  = KH*HS;              // 32
     localparam NREP = H/KH;
-    localparam FW   = 16*(HS/2);          // rope freq_cis width per position (=64)
     localparam NSLOTS = 8;
     localparam SW = 3;
     localparam AW = SW + 6;
+    // Session 6b lever #2 (vfile fusion SB_P->SB_Vc, 8->7 slots) was tried and REVERTED :
+    // it cut cell count (Logic -411, SSRAM -48) but WORSENED routing (789->931 unrouted)
+    // by concentrating V/P accesses into one congested distributed-RAM hotspot. The node
+    // is congestion-bound (Logic 84%), not capacity-bound, so fusing storage is harmful.
     localparam [SW-1:0] SB_XB=0, SB_XN=1, SB_Q=2, SB_Kc=3, SB_Vc=4, SB_ATT=5, SB_OUTV=6, SB_P=7;
     // FFN reuses the attention slots once attention is done : XN=rmsnorm,
     // H1=Q, H3=Kc, SG=Vc, HG=ATT, W2-accumulator=OUTV, W2-partial=P, residual=XB.
@@ -83,14 +84,27 @@ module gen_seq #(
     reg [AW-1:0] vaddr; reg [7:0] vdin; reg vwe;
     function [AW-1:0] vidx; input [SW-1:0] slot; input [5:0] b; vidx = (slot<<6)|b; endfunction
 
-    // ---- KV cache : separate BSRAM, indexed by (layer, pos) ----
-    reg signed [7:0] kmem [0:NL*TMAX*KVW-1];
-    reg signed [7:0] vmem [0:NL*TMAX*KVW-1];
+    // ---- KV cache : block BSRAM, indexed by (layer, pos) ----
+    // 10 KB of K/V is far too big for LUTs (registers or distributed RAM both blow
+    // the device budget), so it MUST live in BSRAM. But the read applies a
+    // per-position variable shift (clip8(mem >>> (ref-sh))) : with that arithmetic
+    // between the array read and the tx_data register, Gowin cannot use the BSRAM
+    // output register and falls back to LUTs. Fix : a clean registered read into
+    // kraw/vraw (BSRAM output register), then the shift + send happen one cycle
+    // later in state E_MMRD. The byte stream to the node is byte-IDENTICAL; only
+    // the inter-byte spacing grows by 1 cycle, absorbed by the elastic ss_link
+    // (tx_busy/HOLD + fifo backpressure). See kv_ridx / kraw / vraw below.
+    (* syn_ramstyle = "block_ram" *) reg signed [7:0] kmem [0:NL*TMAX*KVW-1];
+    (* syn_ramstyle = "block_ram" *) reg signed [7:0] vmem [0:NL*TMAX*KVW-1];
     reg signed [7:0] ksh  [0:NL*TMAX-1];
     reg signed [7:0] vsh  [0:NL*TMAX-1];
 
     // ---- lm_head : VOCAB logits (too big for a vfile slot) + per-chunk shift ----
-    reg signed [7:0] logits [0:VOCAB-1];
+    // In BSRAM (frees ~256 RAM16 of congested CLS). The argmax read applies a shift
+    // (re-align), so like the KV cache it uses a clean registered read (lraw) + a
+    // 1-cycle-delayed compare (states AMAXC/AMAXW) -> BSRAM output register usable.
+    (* syn_ramstyle = "block_ram" *) reg signed [7:0] logits [0:VOCAB-1];
+    reg signed [7:0] lraw;                    // registered logits[amax_i] (BSRAM read)
     reg signed [7:0] csh [0:NCHUNK-1];
     reg [3:0] lmchunk;                       // lm_head tok_emb chunk 0..NCHUNK-1
     reg signed [7:0] sref_lm;                // max chunk shift (argmax re-align)
@@ -159,7 +173,7 @@ module gen_seq #(
     localparam IDLE=0, LOADX=1, BWAIT=2, BUILD=3, E_SET=4, E_BUSY=5, E_DONE=6, RECV=7,
                ROPEQ=8, ROPEK=9, KVWR=10, SCAN=11, RESID=12, DONE_ST=13,
                ALD_A=14, ALD_B=15, ALU_WAIT=16, AST_A=17, FRED_COPY=18,
-               AMAX_INIT=19, AMAX=20;
+               AMAX_INIT=19, AMAX=20, E_MMRD=21, AMAXC=22, AMAXW=23;
     reg [4:0] st;
 
     // rx one-byte-per-ack handshake
@@ -176,18 +190,49 @@ module gen_seq #(
     reg [6:0] hidx;                          // head index during rope
     reg [3:0] rope_slot;                     // slot being roped (Q or Kc)
     reg signed [7:0] rh [0:HS-1];            // head bytes being roped
+    reg [2:0] rcp;                           // rope compute pointer : one rotation/cycle
+    reg rope_rd;                             // rope 2-phase : 0=present ROM addr, 1=compute w/ crom/srom
 
     // max shift scan + MM streaming counters
     reg signed [7:0] sKref, sVref;
     reg [5:0] scan_i;
     reg [5:0] mmp; reg [5:0] mmo; reg mmv;   // MM K/V stream position/offset/region
 
+    // BSRAM read pipeline for the KV cache : continuously register the raw byte at
+    // the current stream address into kraw/vraw (this is the clean, arithmetic-free
+    // read Gowin needs to map kmem/vmem to BSRAM). The MM stream address (mmp,mmo)
+    // is stable for several cycles per byte, so by state E_MMRD kraw/vraw hold the
+    // byte for the current (mmp,mmo) -> the shifted result is byte-identical to the
+    // old direct combinational read.
+    wire [12:0] kv_ridx = layer*TMAX*KVW + mmp*KVW + mmo;
+    reg signed [7:0] kraw, vraw;
+    always @(posedge clk) begin kraw <= kmem[kv_ridx]; vraw <= vmem[kv_ridx]; end
+    // BSRAM read pipeline for logits : lraw lags amax_i by one cycle (see AMAXC/AMAXW).
+    always @(posedge clk) lraw <= logits[amax_i];
+
+    // ---- rope freq_cis : two small BSRAM ROMs, addressed by (pos, pair) ----
+    // Replaces the flat 1088-bit cos_q15/sin_q15 ports : their variable part-select
+    // cos_q15[pos_reg*FW + 16*rcp +: 16] synthesised into two 68:1 muxes + a high-fanout
+    // 1088-bit bus = the GW2AR-18C routing congestion (Session 6b, lever #1). idx =
+    // pos*(HS/2) + rcp. Registered read (crom/srom) -> Gowin maps to BSRAM ; the rope is
+    // already sequenced, so the +1 read latency is a clean 2-phase step (rope_rd) that
+    // leaves the roped bytes IDENTICAL to the old combinational read.
+    (* syn_ramstyle = "block_ram" *) reg signed [15:0] cos_rom [0:NPOS*(HS/2)-1];
+    (* syn_ramstyle = "block_ram" *) reg signed [15:0] sin_rom [0:NPOS*(HS/2)-1];
+    initial begin
+        $readmemh("freq_cis_cos.hex", cos_rom);
+        $readmemh("freq_cis_sin.hex", sin_rom);
+    end
+    wire [6:0] rope_ridx = pos_reg*(HS/2) + rcp;
+    reg signed [15:0] crom, srom;
+    always @(posedge clk) begin crom <= cos_rom[rope_ridx]; srom <= sin_rom[rope_ridx]; end
+
     integer j;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st<=IDLE; done<=0; tx_send<=0; idx<=0; rcnt<=0; bcnt<=0; phase<=PH_FN;
-            ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0;
+            ldi<=0; vwe<=0; hidx<=0; mmp<=0; mmo<=0; mmv<=0; rcp<=0; rope_rd<=0;
             alu_start<=0; fc<=0; in_ffn<=0; layer<=0; token<=0;
             cur_tok<=10'd1; pos_reg<=6'd0; token_valid<=1'b0;
         end else begin
@@ -275,18 +320,29 @@ module gen_seq #(
 
                 // stream packet; vector bytes read combinationally from vfile
                 E_SET: begin
-                    if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && idx>=4 && idx<4+D)
-                                                                    tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
-                    else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
-                              phase==PH_FW1||phase==PH_FW3||phase==PH_FW2||phase==PH_LM) && idx>=5 && idx<5+D)
-                                                                    tx_data<=vfile[vidx(src_slot, idx[5:0]-5)];
-                    else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
-                    else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
-                    else if (phase==PH_MM && idx>=(6+D)) begin
-                        if (!mmv) tx_data <= clip8( $signed(kmem[layer*TMAX*KVW + mmp*KVW + mmo]) >>> (sKref - ksh[layer*TMAX + mmp]) );
-                        else      tx_data <= clip8( $signed(vmem[layer*TMAX*KVW + mmp*KVW + mmo]) >>> (sVref - vsh[layer*TMAX + mmp]) );
+                    // KV cache byte : the raw value is being registered from BSRAM
+                    // into kraw/vraw at the current (mmp,mmo) this cycle; apply the
+                    // shift + send one cycle later in E_MMRD. Everything else sends
+                    // now (vector bytes read combinationally from vfile, header from pkt).
+                    if (phase==PH_MM && idx>=(6+D)) begin
+                        st<=E_MMRD;
+                    end else begin
+                        if ((phase==PH_FN||phase==PH_FN2||phase==PH_FNF) && idx>=4 && idx<4+D)
+                                                                        tx_data<=vfile[vidx(src_slot, idx[5:0]-4)];
+                        else if ((phase==PH_WQ||phase==PH_WK||phase==PH_WV||phase==PH_WO||
+                                  phase==PH_FW1||phase==PH_FW3||phase==PH_FW2||phase==PH_LM) && idx>=5 && idx<5+D)
+                                                                        tx_data<=vfile[vidx(src_slot, idx[5:0]-5)];
+                        else if (phase==PH_SS && idx>=3 && idx<3+D)     tx_data<=vfile[vidx(src_slot, idx[5:0]-3)];
+                        else if (phase==PH_MM && idx>=6 && idx<6+D)     tx_data<=vfile[vidx(SB_Q, idx[5:0]-6)];
+                        else tx_data<=pkt[idx];
+                        tx_send<=1; st<=E_BUSY;
                     end
-                    else tx_data<=pkt[idx];
+                end
+                // KV cache byte : kraw/vraw now hold kmem/vmem at the current
+                // (mmp,mmo) -> apply the per-position re-align shift and send.
+                E_MMRD: begin
+                    if (!mmv) tx_data <= clip8( $signed(kraw) >>> (sKref - ksh[layer*TMAX + mmp]) );
+                    else      tx_data <= clip8( $signed(vraw) >>> (sVref - vsh[layer*TMAX + mmp]) );
                     tx_send<=1; st<=E_BUSY;
                 end
                 E_BUSY: if (tx_busy) st<=E_DONE;
@@ -368,19 +424,29 @@ module gen_seq #(
                 // must not feed back into the compute). ldi 0..7 then write rh serially.
                 // The compute reads vfile at hidx*8; the writes at hidx*8+ldi only start
                 // taking effect from ldi>=1, but rh already holds the full head -> safe.
+                // Compute ONE complex rotation per cycle (rcp=0..HS/2-1) into rh, then
+                // write rh->vfile serially (ldi phase). rh is separate from vfile, so
+                // spreading the 4 rotations over 4 cycles produces the SAME roped bytes
+                // as the old unrolled form -- but the rotation multiplier is now SHARED
+                // (one rotation of hardware, reused) instead of 4 unrolled in parallel,
+                // which is what keeps the design inside the 12-DSP-block budget.
                 ROPEQ: begin
                     if (ldi==0) begin: rqc
-                        integer p; reg signed [15:0] cq, sq; reg signed [7:0] xr, xi;
+                        reg signed [7:0] xr, xi;
                         reg signed [31:0] nr, ni;
-                        for (p=0;p<HS/2;p=p+1) begin
-                            xr = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*p)]);
-                            xi = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*p + 1)]);
-                            cq = $signed(cos_q15[pos_reg*FW + 16*p +: 16]); sq = $signed(sin_q15[pos_reg*FW + 16*p +: 16]);
-                            nr = (xr*cq - xi*sq + 32'sd16384) >>> 15;
-                            ni = (xr*sq + xi*cq + 32'sd16384) >>> 15;
-                            rh[2*p]   <= clip8(nr); rh[2*p+1] <= clip8(ni);
+                        // 2-phase : rope_rd==0 presents the ROM address (crom/srom latch
+                        // cos_rom/sin_rom[rope_ridx] this cycle) ; rope_rd==1 computes with
+                        // the registered crom/srom -- byte-identical to the old direct read.
+                        if (!rope_rd) rope_rd <= 1'b1;
+                        else begin
+                            xr = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*rcp)]);
+                            xi = $signed(vfile[vidx(SB_Q, hidx[2:0]*HS + 2*rcp + 1)]);
+                            nr = (xr*crom - xi*srom + 32'sd16384) >>> 15;
+                            ni = (xr*srom + xi*crom + 32'sd16384) >>> 15;
+                            rh[2*rcp]   <= clip8(nr); rh[2*rcp+1] <= clip8(ni);
+                            rope_rd <= 1'b0;
+                            if (rcp==HS/2-1) begin rcp<=0; ldi<=1; end else rcp<=rcp+1;
                         end
-                        ldi<=1;   // rh not yet written this cycle; start writing next cycle
                     end else begin
                         vaddr<=vidx(SB_Q, hidx[2:0]*HS + (ldi-1)); vdin<=rh[ldi-1]; vwe<=1'b1;
                         if (ldi==HS) begin ldi<=0;
@@ -389,19 +455,20 @@ module gen_seq #(
                         end else ldi<=ldi+1;
                     end
                 end
-                ROPEK: begin
+                ROPEK: begin   // same 2-phase registered-ROM scheme as ROPEQ, on Kc
                     if (ldi==0) begin: rkc
-                        integer p; reg signed [15:0] cq, sq; reg signed [7:0] xr, xi;
+                        reg signed [7:0] xr, xi;
                         reg signed [31:0] nr, ni;
-                        for (p=0;p<HS/2;p=p+1) begin
-                            xr = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*p)]);
-                            xi = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*p + 1)]);
-                            cq = $signed(cos_q15[pos_reg*FW + 16*p +: 16]); sq = $signed(sin_q15[pos_reg*FW + 16*p +: 16]);
-                            nr = (xr*cq - xi*sq + 32'sd16384) >>> 15;
-                            ni = (xr*sq + xi*cq + 32'sd16384) >>> 15;
-                            rh[2*p]   <= clip8(nr); rh[2*p+1] <= clip8(ni);
+                        if (!rope_rd) rope_rd <= 1'b1;
+                        else begin
+                            xr = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*rcp)]);
+                            xi = $signed(vfile[vidx(SB_Kc, hidx[2:0]*HS + 2*rcp + 1)]);
+                            nr = (xr*crom - xi*srom + 32'sd16384) >>> 15;
+                            ni = (xr*srom + xi*crom + 32'sd16384) >>> 15;
+                            rh[2*rcp]   <= clip8(nr); rh[2*rcp+1] <= clip8(ni);
+                            rope_rd <= 1'b0;
+                            if (rcp==HS/2-1) begin rcp<=0; ldi<=1; end else rcp<=rcp+1;
                         end
-                        ldi<=1;
                     end else begin
                         vaddr<=vidx(SB_Kc, hidx[2:0]*HS + (ldi-1)); vdin<=rh[ldi-1]; vwe<=1'b1;
                         if (ldi==HS) begin ldi<=0;
@@ -480,30 +547,32 @@ module gen_seq #(
                     best_val <= -32'sd2147483647; best_idx <= 0; amax_i <= 0;
                     st <= AMAX;
                 end
-                AMAX: begin
+                AMAX: begin   // scan max(csh) into sref_lm ; amax_i stays 0 -> lraw = logits[0]
                     if (scan_c < NCHUNK) begin
                         if (csh[scan_c] > sref_lm) sref_lm <= csh[scan_c];
                         scan_c <= scan_c + 1;
-                    end else begin
-                        begin: sweep
-                            reg signed [31:0] v;
-                            v = $signed(logits[amax_i]) >>> (sref_lm - csh[amax_i[9:6]]);
-                            if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
-                        end
-                        if (amax_i==VOCAB-1) begin
-                            token <= best_idx;
-                            if (gen_mode) begin
-                                token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
-                                if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
-                                else begin  // next token : embed again, KV cache persists
-                                    pos_reg<=pos_reg+1; layer<=0; in_ffn<=1'b0; fc<=2'd0;
-                                    phase<=PH_EE; st<=BUILD;
-                                end
-                            end else begin done<=1; st<=IDLE; end
-                        end
-                        else amax_i <= amax_i + 1;
-                    end
+                    end else st <= AMAXC;
                 end
+                // running max over VOCAB : lraw holds logits[amax_i] (registered BSRAM
+                // read), so compare here then step amax_i and let lraw re-settle (AMAXW).
+                AMAXC: begin: sweep
+                    reg signed [31:0] v;
+                    v = $signed(lraw) >>> (sref_lm - csh[amax_i[9:6]]);
+                    if (v > best_val) begin best_val <= v; best_idx <= amax_i; end
+                    if (amax_i==VOCAB-1) begin
+                        token <= best_idx;
+                        if (gen_mode) begin
+                            token_valid <= 1'b1; cur_tok <= best_idx;   // emit + feed next EMBED
+                            if (pos_reg == NPOS-1) begin done<=1; st<=IDLE; end   // last token
+                            else begin  // next token : embed again, KV cache persists
+                                pos_reg<=pos_reg+1; layer<=0; in_ffn<=1'b0; fc<=2'd0;
+                                phase<=PH_EE; st<=BUILD;
+                            end
+                        end else begin done<=1; st<=IDLE; end
+                    end
+                    else begin amax_i <= amax_i + 1; st <= AMAXW; end
+                end
+                AMAXW: st <= AMAXC;   // 1-cycle wait : lraw <= logits[amax_i] settles
             endcase
         end
     end
