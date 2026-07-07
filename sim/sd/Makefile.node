@@ -1,0 +1,34 @@
+# Full node + SD boot integration sim (top.v with SD_BOOT).
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+
+RTL := $(abspath ../../src)
+
+# sim models
+VERILOG_SOURCES += $(abspath ../models/Gowin_rPLL.v)
+VERILOG_SOURCES += $(abspath ../models/MULTALU18X18.v)
+VERILOG_SOURCES += $(abspath ../models/sdram_chip.v)
+# real RTL (top.v deps)
+VERILOG_SOURCES += $(RTL)/mac18.v
+VERILOG_SOURCES += $(RTL)/rmsnorm_op.v
+VERILOG_SOURCES += $(RTL)/silu_op.v
+VERILOG_SOURCES += $(RTL)/rope_op.v
+VERILOG_SOURCES += $(RTL)/softmax_op.v
+VERILOG_SOURCES += $(RTL)/attention_head_op.v
+VERILOG_SOURCES += $(RTL)/sdram.v
+VERILOG_SOURCES += $(RTL)/uart_rx_8n1.v
+VERILOG_SOURCES += $(RTL)/uart_tx_8n1.v
+# SD stack
+VERILOG_SOURCES += $(abspath sd_card.v)
+VERILOG_SOURCES += $(abspath sd_ctrl.v)
+VERILOG_SOURCES += $(RTL)/sd_boot.v
+# top (wrapper `include`s top.v with SD_BOOT + NODE_ONLY)
+VERILOG_SOURCES += $(RTL)/top_sd_wrap.v
+VERILOG_SOURCES += $(abspath node_sd.v)
+
+COMPILE_ARGS += -I$(RTL)
+
+TOPLEVEL := node_sd
+MODULE   ?= test_node_sd
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

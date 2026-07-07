@@ -1,0 +1,32 @@
+# Cluster (2 nodes) + SD boot per node + tensor-parallel FFN.
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+RTL := $(abspath ../../src)
+
+VERILOG_SOURCES += $(abspath ../models/Gowin_rPLL.v)
+VERILOG_SOURCES += $(abspath ../models/MULTALU18X18.v)
+VERILOG_SOURCES += $(abspath ../models/sdram_chip.v)
+VERILOG_SOURCES += $(RTL)/mac18.v
+VERILOG_SOURCES += $(RTL)/rmsnorm_op.v
+VERILOG_SOURCES += $(RTL)/silu_op.v
+VERILOG_SOURCES += $(RTL)/rope_op.v
+VERILOG_SOURCES += $(RTL)/softmax_op.v
+VERILOG_SOURCES += $(RTL)/attention_head_op.v
+VERILOG_SOURCES += $(RTL)/sdram.v
+VERILOG_SOURCES += $(RTL)/uart_rx_8n1.v
+VERILOG_SOURCES += $(RTL)/uart_tx_8n1.v
+VERILOG_SOURCES += $(abspath sd_card.v)
+VERILOG_SOURCES += $(abspath sd_ctrl.v)
+VERILOG_SOURCES += $(RTL)/sd_boot.v
+VERILOG_SOURCES += $(RTL)/top_sd_wrap.v
+VERILOG_SOURCES += $(abspath ../link/vec_alu.v)
+VERILOG_SOURCES += $(abspath ../ffn_tp_seq.v)
+VERILOG_SOURCES += $(abspath node_sd.v)
+VERILOG_SOURCES += $(abspath ffn_tp_sd_top.v)
+
+COMPILE_ARGS += -I$(RTL)
+
+TOPLEVEL := ffn_tp_sd_top
+MODULE   ?= test_ffn_tp_sd
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

@@ -1,0 +1,35 @@
+# Contraintes physiques - harnais de bring-up SD (Tang Nano 20K, GW2AR-18C)
+
+# Horloge 27 MHz
+IO_LOC "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33;
+
+# UART FPGA -> PC (passerelle USB-serie embarquee)
+IO_LOC "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+
+# LEDs utilisateur (actives a l'etat bas)
+IO_LOC "led[0]" 15;
+IO_PORT "led[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led[1]" 16;
+IO_PORT "led[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led[2]" 17;
+IO_PORT "led[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led[3]" 18;
+IO_PORT "led[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led[4]" 19;
+IO_PORT "led[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led[5]" 20;
+IO_PORT "led[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+# Carte micro SD (slot TF) - mode SPI (source : nestang.cst officiel Sipeed)
+#   sd_clk = SD_CLK (SCLK)   sd_cmd = SD_CMD (MOSI)
+#   sd_dat0 = SD_DAT0 (MISO) sd_dat3 = SD_DAT3 (CS#)
+IO_LOC "sd_clk" 83;
+IO_PORT "sd_clk" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "sd_cmd" 82;
+IO_PORT "sd_cmd" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "sd_dat0" 84;
+IO_PORT "sd_dat0" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC "sd_dat3" 81;
+IO_PORT "sd_dat3" IO_TYPE=LVCMOS33 DRIVE=8;

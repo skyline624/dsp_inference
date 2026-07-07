@@ -1,0 +1,29 @@
+# yosys LUT-estimate flow for one node (src/top.v) on Gowin GW2A.
+# Run from sim/pnr inside an image that has yosys (hdlc/impl).
+# The .hex LUT files must be reachable; we read sources from ../../src.
+#
+#   yosys synth.ys
+#
+# NOTE: yosys + synth_gowin gives a LUT/FF/BRAM cell ESTIMATE. It is NOT the
+# authoritative GW2AR-18 utilization (the 91% figure came from Gowin EDA, whose
+# packing/mapping differs). Use this for relative comparisons; use Gowin EDA
+# (gw_sh build.tcl) for the official fit/route/timing numbers.
+
+read_verilog blackbox_prims.v
+
+# real RTL of one node (PLL wrapper + DSP wrapper kept; their hard prims blackboxed)
+read_verilog ../../src/gowin_rpll.v
+read_verilog ../../src/mac18.v
+read_verilog ../../src/rmsnorm_op.v
+read_verilog ../../src/silu_op.v
+read_verilog ../../src/rope_op.v
+read_verilog ../../src/softmax_op.v
+read_verilog ../../src/attention_head_op.v
+read_verilog ../../src/sdram.v
+read_verilog ../../src/uart_rx_8n1.v
+read_verilog ../../src/uart_tx_8n1.v
+read_verilog ../../src/top.v
+
+hierarchy -top top
+synth_gowin -top top
+stat

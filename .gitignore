@@ -21,3 +21,13 @@ Thumbs.db
 # Gowin temporary
 *.gprj.user
 *.user
+
+# Simulation build artifacts (cocotb / Icarus Verilog)
+sim_build/
+*.vvp
+*.vcd
+results.xml
+
+# Large binaries: model weights + generated SD image (external / regenerable)
+host/models/
+host/model.img

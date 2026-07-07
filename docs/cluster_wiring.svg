@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 860" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e8741c"/>
+    </marker>
+    <marker id="arb" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a90d9"/>
+    </marker>
+    <marker id="argray" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#888"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1140" height="860" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="570" y="40" text-anchor="middle" font-size="27" font-weight="700" fill="#1a1a2e">Cluster FPGA — topologie en anneau (Tang Nano 20K)</text>
+  <text x="570" y="68" text-anchor="middle" font-size="16" fill="#555">Chaque carte = un nœud = une tranche du modèle. Seules les activations (petites) circulent entre les cartes ; les poids restent en SDRAM locale.</text>
+
+  <!-- PC host -->
+  <rect x="40" y="100" width="210" height="92" rx="10" fill="#eceff4" stroke="#9aa3b2" stroke-width="2"/>
+  <text x="145" y="130" text-anchor="middle" font-size="17" font-weight="700" fill="#333">PC hôte</text>
+  <text x="145" y="153" text-anchor="middle" font-size="13" fill="#555">USB : charge les poids,</text>
+  <text x="145" y="171" text-anchor="middle" font-size="13" fill="#555">lit le texte généré</text>
+  <text x="145" y="187" text-anchor="middle" font-size="12" font-style="italic" fill="#888">(optionnel — mode autonome possible)</text>
+  <!-- USB cable to node 0 -->
+  <path d="M150,192 C150,240 215,250 215,288" fill="none" stroke="#888" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#argray)"/>
+  <text x="120" y="250" font-size="12" fill="#888" transform="rotate(0)">USB</text>
+
+  <!-- ===== Cards ===== -->
+  <!-- Card template repeated 3x -->
+  <!-- Node 0 -->
+  <g>
+    <rect x="60" y="290" width="300" height="240" rx="14" fill="#eaf2fb" stroke="#4a90d9" stroke-width="2.5"/>
+    <text x="210" y="318" text-anchor="middle" font-size="17" font-weight="700" fill="#1f3a5f">Tang Nano 20K — Nœud 0</text>
+    <rect x="82" y="334" width="256" height="96" rx="8" fill="#cfe2f6" stroke="#4a90d9" stroke-width="1.5"/>
+    <text x="210" y="358" text-anchor="middle" font-size="15" font-weight="700" fill="#1f3a5f">FPGA GW2AR-18C</text>
+    <text x="210" y="380" text-anchor="middle" font-size="12.5" fill="#33506e">DSP (MAC int8) + briques</text>
+    <text x="210" y="398" text-anchor="middle" font-size="12.5" fill="#33506e">matmul · rmsnorm · silu · attention</text>
+    <text x="210" y="418" text-anchor="middle" font-size="12" fill="#33506e">+ lien rapide + (mini-séquenceur)</text>
+    <rect x="82" y="442" width="256" height="70" rx="8" fill="#d9f0dc" stroke="#48a85a" stroke-width="1.5"/>
+    <text x="210" y="466" text-anchor="middle" font-size="15" font-weight="700" fill="#1f5f2e">SDRAM locale</text>
+    <text x="210" y="488" text-anchor="middle" font-size="12.5" fill="#2e5f3a">tranche 1/3 des poids</text>
+    <text x="210" y="505" text-anchor="middle" font-size="11.5" fill="#2e5f3a">(les poids ne traversent jamais les liens)</text>
+  </g>
+  <!-- Node 1 -->
+  <g>
+    <rect x="420" y="290" width="300" height="240" rx="14" fill="#eaf2fb" stroke="#4a90d9" stroke-width="2.5"/>
+    <text x="570" y="318" text-anchor="middle" font-size="17" font-weight="700" fill="#1f3a5f">Tang Nano 20K — Nœud 1</text>
+    <rect x="442" y="334" width="256" height="96" rx="8" fill="#cfe2f6" stroke="#4a90d9" stroke-width="1.5"/>
+    <text x="570" y="358" text-anchor="middle" font-size="15" font-weight="700" fill="#1f3a5f">FPGA GW2AR-18C</text>
+    <text x="570" y="380" text-anchor="middle" font-size="12.5" fill="#33506e">DSP (MAC int8) + briques</text>
+    <text x="570" y="398" text-anchor="middle" font-size="12.5" fill="#33506e">matmul · rmsnorm · silu · attention</text>
+    <text x="570" y="418" text-anchor="middle" font-size="12" fill="#33506e">+ lien rapide + (mini-séquenceur)</text>
+    <rect x="442" y="442" width="256" height="70" rx="8" fill="#d9f0dc" stroke="#48a85a" stroke-width="1.5"/>
+    <text x="570" y="466" text-anchor="middle" font-size="15" font-weight="700" fill="#1f5f2e">SDRAM locale</text>
+    <text x="570" y="488" text-anchor="middle" font-size="12.5" fill="#2e5f3a">tranche 2/3 des poids</text>
+    <text x="570" y="505" text-anchor="middle" font-size="11.5" fill="#2e5f3a">(les poids ne traversent jamais les liens)</text>
+  </g>
+  <!-- Node 2 -->
+  <g>
+    <rect x="780" y="290" width="300" height="240" rx="14" fill="#eaf2fb" stroke="#4a90d9" stroke-width="2.5"/>
+    <text x="930" y="318" text-anchor="middle" font-size="17" font-weight="700" fill="#1f3a5f">Tang Nano 20K — Nœud 2</text>
+    <rect x="802" y="334" width="256" height="96" rx="8" fill="#cfe2f6" stroke="#4a90d9" stroke-width="1.5"/>
+    <text x="930" y="358" text-anchor="middle" font-size="15" font-weight="700" fill="#1f3a5f">FPGA GW2AR-18C</text>
+    <text x="930" y="380" text-anchor="middle" font-size="12.5" fill="#33506e">DSP (MAC int8) + briques</text>
+    <text x="930" y="398" text-anchor="middle" font-size="12.5" fill="#33506e">matmul · rmsnorm · silu · attention</text>
+    <text x="930" y="418" text-anchor="middle" font-size="12" fill="#33506e">+ lien rapide + (mini-séquenceur)</text>
+    <rect x="802" y="442" width="256" height="70" rx="8" fill="#d9f0dc" stroke="#48a85a" stroke-width="1.5"/>
+    <text x="930" y="466" text-anchor="middle" font-size="15" font-weight="700" fill="#1f5f2e">SDRAM locale</text>
+    <text x="930" y="488" text-anchor="middle" font-size="12.5" fill="#2e5f3a">tranche 3/3 des poids</text>
+    <text x="930" y="505" text-anchor="middle" font-size="11.5" fill="#2e5f3a">(les poids ne traversent jamais les liens)</text>
+  </g>
+
+  <!-- ===== Ring links (forward) ===== -->
+  <line x1="360" y1="372" x2="420" y2="372" stroke="#e8741c" stroke-width="4" marker-end="url(#ar)"/>
+  <line x1="720" y1="372" x2="780" y2="372" stroke="#e8741c" stroke-width="4" marker-end="url(#ar)"/>
+  <text x="390" y="362" text-anchor="middle" font-size="12" fill="#c25a10" font-weight="700">lien</text>
+  <text x="750" y="362" text-anchor="middle" font-size="12" fill="#c25a10" font-weight="700">lien</text>
+
+  <!-- wrap-around link node2 -> node0 -->
+  <path d="M930,530 L930,600 L210,600 L210,532" fill="none" stroke="#e8741c" stroke-width="4" marker-end="url(#ar)"/>
+  <text x="570" y="592" text-anchor="middle" font-size="13" fill="#c25a10" font-weight="700">boucle de l'anneau (le dernier nœud reboucle sur le premier)</text>
+
+  <text x="570" y="630" text-anchor="middle" font-size="13.5" fill="#444" font-style="italic">Sens de circulation des activations dans l'anneau  →  all-gather / all-reduce en N−1 tours</text>
+
+  <!-- ===== Detail of one link ===== -->
+  <rect x="40" y="652" width="520" height="178" rx="10" fill="#fff7ef" stroke="#e8741c" stroke-width="2"/>
+  <text x="300" y="678" text-anchor="middle" font-size="15" font-weight="700" fill="#c25a10">Détail d'un lien (source-synchrone, broches FPGA→FPGA)</text>
+  <line x1="80" y1="702" x2="430" y2="702" stroke="#e8741c" stroke-width="3" marker-end="url(#ar)"/>
+  <text x="455" y="706" font-size="12.5" fill="#444">data[7:0..15:0]</text>
+  <line x1="80" y1="726" x2="430" y2="726" stroke="#e8741c" stroke-width="3" marker-end="url(#ar)"/>
+  <text x="455" y="730" font-size="12.5" fill="#444">horloge transmise</text>
+  <line x1="80" y1="750" x2="430" y2="750" stroke="#e8741c" stroke-width="3" marker-end="url(#ar)"/>
+  <text x="455" y="754" font-size="12.5" fill="#444">valid (donnée prête)</text>
+  <line x1="430" y1="776" x2="80" y2="776" stroke="#4a90d9" stroke-width="3" marker-end="url(#arb)"/>
+  <text x="455" y="780" font-size="12.5" fill="#444">almost_full (retour)</text>
+  <text x="300" y="812" text-anchor="middle" font-size="11.5" fill="#777">≈ 11–19 fils. Beaucoup plus rapide que l'UART, anti-perte (backpressure).</text>
+
+  <!-- ===== Notes / why ===== -->
+  <rect x="585" y="652" width="515" height="178" rx="10" fill="#f3f6fb" stroke="#9aa3b2" stroke-width="2"/>
+  <text x="842" y="678" text-anchor="middle" font-size="15" font-weight="700" fill="#33506e">Pourquoi cette topologie</text>
+  <text x="605" y="704" font-size="13" fill="#333">• 1 lien entrant + 1 lien sortant par carte →</text>
+  <text x="618" y="722" font-size="13" fill="#333">nombre de broches CONSTANT, quel que soit N (scalable).</text>
+  <text x="605" y="745" font-size="13" fill="#333">• Les poids sont répartis : on fait tenir un modèle</text>
+  <text x="618" y="763" font-size="13" fill="#333">plus GROS (plus de SDRAM) et plus RAPIDE (plus de DSP).</text>
+  <text x="605" y="786" font-size="13" fill="#333">• Horloge propre à chaque carte → passage de domaine</text>
+  <text x="618" y="804" font-size="13" fill="#333">(FIFO asynchrone) déjà géré et validé en simulation.</text>
+  <text x="605" y="823" font-size="12" fill="#777">• Alim : chaque carte par son USB (ou une alim 5 V commune).</text>
+</svg>
